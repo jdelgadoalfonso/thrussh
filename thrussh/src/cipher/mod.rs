@@ -26,6 +26,8 @@ pub mod clear;
 use cryptovec::CryptoVec;
 
 
+pub const AES128_CTR: Name = Name("aes128-ctr");
+
 pub struct Cipher {
     pub name: Name,
     pub key_len: usize,
