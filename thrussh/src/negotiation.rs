@@ -49,10 +49,12 @@ pub struct Preferred {
     pub compression: &'static [&'static str],
 }
 
+pub const AES128-CTR: cipher::Name = cipher::Name("aes128-ctr");
+
 pub const DEFAULT: Preferred = Preferred {
     kex: &[kex::CURVE25519],
     key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::RSA ],
-    cipher: &[cipher::chacha20poly1305::NAME],
+    cipher: &[cipher::chacha20poly1305::NAME, AES128-CTR],
     mac: &["none"],
     compression: &["none"],
 };
