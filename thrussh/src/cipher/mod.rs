@@ -21,12 +21,11 @@ use tokio::io::AsyncRead;
 use read_exact_from::*;
 use futures::{Future, Async, Poll};
 use std::sync::Arc;
-pub mod chacha20poly1305;
-pub mod clear;
 use cryptovec::CryptoVec;
 
-
-pub const AES128_CTR: Name = Name("aes128-ctr");
+pub mod chacha20poly1305;
+pub mod aes128ctr;
+pub mod clear;
 
 pub struct Cipher {
     pub name: Name,
@@ -38,6 +37,7 @@ pub struct Cipher {
 pub enum OpeningCipher {
     Clear(clear::Key),
     Chacha20Poly1305(chacha20poly1305::OpeningKey),
+    Aes128Ctr(aes128ctr::OpeningKey),
 }
 
 impl<'a> OpeningCipher {
@@ -45,6 +45,7 @@ impl<'a> OpeningCipher {
         match *self {
             OpeningCipher::Clear(ref key) => key,
             OpeningCipher::Chacha20Poly1305(ref key) => key,
+            OpeningCipher::Aes128Ctr(ref key) => key,
         }
     }
 }
@@ -52,6 +53,7 @@ impl<'a> OpeningCipher {
 pub enum SealingCipher {
     Clear(clear::Key),
     Chacha20Poly1305(chacha20poly1305::SealingKey),
+    Aes128Ctr(aes128ctr::SealingKey),
 }
 
 impl<'a> SealingCipher {
@@ -59,6 +61,7 @@ impl<'a> SealingCipher {
         match *self {
             SealingCipher::Clear(ref key) => key,
             SealingCipher::Chacha20Poly1305(ref key) => key,
+            SealingCipher::Aes128Ctr(ref key) => key,
         }
     }
 }

@@ -1,4 +1,6 @@
 extern crate libc;
+extern crate aes_ctr;
+
 use libc::{c_int, c_ulonglong};
 use std::marker::PhantomData;
 
@@ -185,6 +187,30 @@ pub mod scalarmult {
                 crypto_scalarmult_curve25519(q.0.as_mut_ptr(), n.0.as_ptr(), p.0.as_ptr());
             }
             q
+        }
+    }
+}
+
+pub mod aes_128_ctr {
+    use super::*;
+    use aes_ctr::Aes128Ctr;
+    use aes_ctr::stream_cipher::{
+        NewStreamCipher, SyncStreamCipher, generic_array::GenericArray
+    };
+
+    pub const NONCE_BYTES: usize = 4;
+    pub const KEY_BYTES: usize = 16;
+    pub struct Nonce(pub [u8; NONCE_BYTES]);
+    pub struct Key(pub [u8; KEY_BYTES]);
+
+    impl Sodium {
+        pub fn apply_aes128ctr(&self, c: &mut [u8], n: &Nonce, k: &Key) {
+            let key = GenericArray::from_slice(&k.0);
+            let nonce = GenericArray::from_slice(&n.0);
+            // create cipher instance
+            let mut cipher = Aes128Ctr::new(&key, &nonce);
+            // apply keystream (encrypt)
+            cipher.apply_keystream(c);
         }
     }
 }

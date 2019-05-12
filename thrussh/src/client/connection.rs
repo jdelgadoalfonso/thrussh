@@ -546,8 +546,8 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
                 &[msg::NEWKEYS],
                 &mut session.0.write_buffer,
             );
-            session.0.kex = Some(Kex::NewKeys(newkeys));
             newkeys.sent = true;
+            session.0.kex = Some(Kex::NewKeys(newkeys));
         }
         Ok(())
     }

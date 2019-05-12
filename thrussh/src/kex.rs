@@ -170,6 +170,7 @@ impl Algorithm {
     ) -> Result<super::cipher::CipherPair, Error> {
         let cipher = match cipher {
             super::cipher::chacha20poly1305::NAME => &super::cipher::chacha20poly1305::CIPHER,
+            super::cipher::aes128ctr::NAME => &super::cipher::aes128ctr::CIPHER,
             _ => unreachable!(),
         };
 

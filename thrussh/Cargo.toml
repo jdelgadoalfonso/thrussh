@@ -24,6 +24,7 @@ include = [
         "src/bin/client.rs",
         "src/bin/server.rs",
         "src/cipher/chacha20poly1305.rs",
+        "src/cipher/aes128ctr.rs",
         "src/cipher/clear.rs",
         "src/cipher/mod.rs",
         "src/client/mod.rs",
@@ -45,16 +46,16 @@ include = [
         ]
 
 [dependencies]
-byteorder = "1.2"
+byteorder = "1.3"
 bitflags = "1.0"
 log = "0.4"
-thrussh-keys = "0.11.3"
+thrussh-keys = "0.11.9"
 openssl = "0.10"
-thrussh-libsodium = "0.1"
-cryptovec = "0.4.1"
+thrussh-libsodium = "0.1.3"
+cryptovec = "0.4.6"
 tokio = "0.1"
 tokio-io = "0.1"
 futures = "0.1"
 
 [dev-dependencies]
-env_logger = "0.5"
+env_logger = "0.6"

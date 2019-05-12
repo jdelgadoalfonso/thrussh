@@ -533,8 +533,8 @@ impl<E:std::error::Error> std::error::Error for HandlerError<E> {
     }
     fn cause(&self) -> Option<&std::error::Error> {
         match *self {
-            HandlerError::Error(ref e) => e.cause(),
-            HandlerError::Handler(ref e) => e.cause(),
+            HandlerError::Error(ref e) => e.source(),
+            HandlerError::Handler(ref e) => e.source(),
         }
     }
 }

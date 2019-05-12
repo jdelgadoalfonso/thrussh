@@ -52,7 +52,7 @@ pub struct Preferred {
 pub const DEFAULT: Preferred = Preferred {
     kex: &[kex::CURVE25519],
     key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::RSA ],
-    cipher: &[cipher::chacha20poly1305::NAME, cipher::AES128_CTR],
+    cipher: &[cipher::chacha20poly1305::NAME, cipher::aes128ctr::NAME],
     mac: &["none"],
     compression: &["none"],
 };
