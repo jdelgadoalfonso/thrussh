@@ -135,7 +135,7 @@ pub trait Select {
             return Err(Error::NoCommonCipher);
         }
         let mac_string = try!(r.read_string()); // SERVER_TO_CLIENT
-        debug!("MAC: {:?}", mac_string);
+        debug!("MAC: {:X?}", mac_string);
         let mac = Self::select(pref.mac, try!(r.read_string()));
         let mac = mac.and_then(|(_, x)| Some(x));
         debug!("MAC: {:?}", mac);
