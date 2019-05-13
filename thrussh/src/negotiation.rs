@@ -137,6 +137,7 @@ pub trait Select {
         try!(r.read_string()); // SERVER_TO_CLIENT
         let mac = Self::select(pref.mac, try!(r.read_string()));
         let mac = mac.and_then(|(_, x)| Some(x));
+        debug!("MAC: {:?}", mac);
         try!(r.read_string()); // SERVER_TO_CLIENT
         try!(r.read_string()); //
         try!(r.read_string()); //
