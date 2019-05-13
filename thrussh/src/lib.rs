@@ -386,6 +386,9 @@ pub enum Error {
     /// No common cipher.
     NoCommonCipher,
 
+    /// No common hmac.
+    NoCommonHmac,
+
     /// Invalid SSH version string.
     Version,
 
@@ -489,6 +492,7 @@ impl std::error::Error for Error {
             Error::NoCommonKexAlgo => "No common key exchange algorithms were found",
             Error::NoCommonKeyAlgo => "No common signature algorithms were found",
             Error::NoCommonCipher => "No common ciphers were found",
+            Error::NoCommonHmac => "No common hmac was found",
             Error::Kex => "Received invalid key exchange packet",
             Error::Version => "Invalid version string from the remote side",
             Error::PacketAuth => "Incorrect packet authentication code",

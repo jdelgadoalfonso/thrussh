@@ -134,20 +134,25 @@ pub trait Select {
             );
             return Err(Error::NoCommonCipher);
         }
-        let mac_string = try!(r.read_string()); // SERVER_TO_CLIENT
-        debug!("MAC: {:X?}", mac_string);
-        let mac = Self::select(pref.mac, try!(r.read_string()));
-        let mac = mac.and_then(|(_, x)| Some(x));
-        debug!("MAC: {:?}", mac);
-        // try!(r.read_string()); // SERVER_TO_CLIENT
-        let mac_string = try!(r.read_string()); // SERVER_TO_CLIENT
-        debug!("MAC: {:X?}", mac_string);
+        try!(r.read_string()); // SERVER_TO_CLIENT
+        try!(r.read_string());
+        let hmac_string = try!(r.read_string()); // SERVER_TO_CLIENT
+        let hmac = Self::select(pref.mac, hmac_string);
+        let hmac = hmac.and_then(|(_, x)| Some(x));
+        if hmac.is_none() {
+            debug!(
+                "Could not find common hmac, other side only supports {:?}, we only support {:?}",
+                from_utf8(hmac_string),
+                pref.mac
+            );
+            return Err(Error::NoCommonHmac);
+        }
         try!(r.read_string()); //
         try!(r.read_string()); //
         try!(r.read_string()); //
 
         let follows = try!(r.read_byte()) != 0;
-        match (cipher, mac, follows) {
+        match (cipher, hmac, follows) {
             (Some((_, cip)), mac, fol) => {
                 Ok(Names {
                     kex: kex_algorithm,
