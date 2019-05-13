@@ -32,7 +32,7 @@ pub static CIPHER: super::Cipher = super::Cipher {
     make_opening_cipher,
 };
 
-pub const NAME: super::Name = super::Name("aes-128-ctr");
+pub const NAME: super::Name = super::Name("aes128-ctr");
 
 fn make_sealing_cipher(k: &[u8]) -> super::SealingCipher {
     let mut k1 = Key([0; KEY_BYTES]);
