@@ -86,11 +86,11 @@ impl KexDh {
             assert!(buf[0] == msg::KEX_ECDH_INIT);
             let mut r = buf.reader(1);
             self.exchange.client_ephemeral.extend(r.read_string()?);
-            let kex = try!(kex::Algorithm::server_dh(
+            let kex = kex::Algorithm::server_dh(
                 self.names.kex,
                 &mut self.exchange,
                 buf,
-            ));
+            )?;
             // Then, we fill the write buffer right away, so that we
             // can output it immediately when the time comes.
             let kexdhdone = KexDhDone {
@@ -101,11 +101,11 @@ impl KexDh {
                 session_id: self.session_id,
             };
 
-            let hash = try!(kexdhdone.kex.compute_exchange_hash(
+            let hash = kexdhdone.kex.compute_exchange_hash(
                 &config.keys[kexdhdone.key],
                 &kexdhdone.exchange,
                 buffer,
-            ));
+            )?;
             debug!("exchange hash: {:?}", hash);
             buffer.clear();
             buffer.push(msg::KEX_ECDH_REPLY);
@@ -122,7 +122,7 @@ impl KexDh {
             cipher.write(&[msg::NEWKEYS], write_buffer);
 
             Ok(Kex::NewKeys(
-                try!(kexdhdone.compute_keys(hash, buffer, buffer2, true)),
+                kexdhdone.compute_keys(hash, buffer, buffer2, true)?,
             ))
         }
     }

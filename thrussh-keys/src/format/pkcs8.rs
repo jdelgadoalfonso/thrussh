@@ -11,6 +11,7 @@ use bit_vec::BitVec;
 use std::borrow::Cow;
 use key::SignatureHash;
 use openssl::pkey::Private;
+use openssl::bn::BigNum;
 
 const PBES2: &'static [u64] = &[1, 2, 840, 113549, 1, 5, 13];
 const PBKDF2: &'static [u64] = &[1, 2, 840, 113549, 1, 5, 12];
@@ -206,8 +207,6 @@ fn read_key_v0(reader: &mut BERReaderSeq) -> Result<key::KeyPair, Error> {
                 if version != 0 {
                     return Ok(Err(Error::CouldNotReadKey))
                 }
-                use openssl::bn::BigNum;
-                use openssl::rsa::Rsa;
                 let mut read_key = || -> Result<Rsa<Private>, Error> {
                     Ok(Rsa::from_private_components (
                         BigNum::from_slice(&reader.next().read_biguint()?.to_bytes_be())?,

@@ -49,7 +49,7 @@ impl<R: AsyncRead + AsyncWrite + Tcp, H: Handler, F: Fn(&Connection<R, H>) -> bo
                 {
                     return Ok(Async::Ready(connection));
                 } else {
-                    match try!(connection.atomic_poll()) {
+                    match connection.atomic_poll()? {
                         Async::Ready(Status::Ok) => {
                             self.connection = Some(connection);
                         }
@@ -87,7 +87,7 @@ impl<R: AsyncRead + AsyncWrite + Tcp, H: Handler> Future for WaitFlush<R, H> {
         loop {
             debug!("WaitFlush loop");
             if let Some(mut c) = self.connection.take() {
-                match try!(c.atomic_poll()) {
+                match c.atomic_poll()? {
                     Async::Ready(Status::Disconnect) => return Ok(Async::Ready(c)),
                     Async::NotReady => {
                         self.connection = Some(c);

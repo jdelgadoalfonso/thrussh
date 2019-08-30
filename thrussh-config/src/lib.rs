@@ -38,7 +38,7 @@ impl std::error::Error for Error {
             Error::NoHome => "No home directory",
         }
     }
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         if let Error::IO(ref e) = *self {
             Some(e)
         } else {

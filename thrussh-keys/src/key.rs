@@ -43,8 +43,8 @@ pub const ED25519: Name = Name("ssh-ed25519");
 pub const RSA_SHA2_512: Name = Name("rsa-sha2-512");
 /// The name of the ssh-sha2-256 algorithm for SSH.
 pub const RSA_SHA2_256: Name = Name("rsa-sha2-256");
-
-pub const SSH_RSA: &'static str = "ssh-rsa";
+/// The name of the ssh-rsa algorithm for SSH.
+pub const SSH_RSA: Name = Name("ssh-rsa");
 
 impl Name {
     /// Base name of the private key file for a key name.
@@ -53,6 +53,7 @@ impl Name {
             ED25519 => "id_ed25519",
             RSA_SHA2_512 => "id_rsa",
             RSA_SHA2_256 => "id_rsa",
+            SSH_RSA => "id_rsa",
             _ => unreachable!(),
         }
     }

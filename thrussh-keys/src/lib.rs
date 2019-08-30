@@ -213,8 +213,8 @@ const KEYTYPE_ED25519: &'static [u8] = b"ssh-ed25519";
 /// ```
 pub fn load_public_key<P:AsRef<Path>>(path: P) -> Result<key::PublicKey> {
     let mut pubkey = String::new();
-    let mut file = try!(File::open(path.as_ref()));
-    try!(file.read_to_string(&mut pubkey));
+    let mut file = File::open(path.as_ref())?;
+    file.read_to_string(&mut pubkey)?;
 
     let mut split = pubkey.split_whitespace();
     match (split.next(), split.next()) {
@@ -379,7 +379,7 @@ pub fn check_known_hosts_path<P: AsRef<Path>>(host: &str,
                 (Some(h), Some(k)) => {
                     let host_matches = h.split(',').any(|x| x == host_port);
                     if host_matches {
-                        if &try!(parse_public_key_base64(k)) == pubkey {
+                        if &parse_public_key_base64(k)? == pubkey {
                             return Ok(true);
                         } else {
                             return Err(Error::KeyChanged(line));
@@ -464,17 +464,51 @@ e+JpiSq66Z6GIt0801skPh20jxOO3F52SoX1IeO5D5PXfZrfSZlw6S8c7bwyp2FHxDewRx
 7/wNsnDM0T7nLv/Q==
 -----END OPENSSH PRIVATE KEY-----";
 
+    const RSA_KEY: &'static str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn
+NhAAAAAwEAAQAAAQEAuSvQ9m76zhRB4m0BUKPf17lwccj7KQ1Qtse63AOqP/VYItqEH8un
+rxPogXNBgrcCEm/ccLZZsyE3qgp3DRQkkqvJhZ6O8VBPsXxjZesRCqoFNCczy+Mf0R/Qmv
+Rnpu5+4DDLz0p7vrsRZW9ji/c98KzxeUonWgkplQaCBYLN875WdeUYMGtb1MLfNCEj177j
+gZl3CzttLRK3su6dckowXcXYv1gPTPZAwJb49J43o1QhV7+1zdwXvuFM6zuYHdu9ZHSKir
+6k1dXOET3/U+LWG5ofAo8oxUWv/7vs6h7MeajwkUeIBOWYtD+wGYRvVpxvj7nyOoWtg+jm
+0X6ndnsD+QAAA8irV+ZAq1fmQAAAAAdzc2gtcnNhAAABAQC5K9D2bvrOFEHibQFQo9/XuX
+BxyPspDVC2x7rcA6o/9Vgi2oQfy6evE+iBc0GCtwISb9xwtlmzITeqCncNFCSSq8mFno7x
+UE+xfGNl6xEKqgU0JzPL4x/RH9Ca9Gem7n7gMMvPSnu+uxFlb2OL9z3wrPF5SidaCSmVBo
+IFgs3zvlZ15Rgwa1vUwt80ISPXvuOBmXcLO20tErey7p1ySjBdxdi/WA9M9kDAlvj0njej
+VCFXv7XN3Be+4UzrO5gd271kdIqKvqTV1c4RPf9T4tYbmh8CjyjFRa//u+zqHsx5qPCRR4
+gE5Zi0P7AZhG9WnG+PufI6ha2D6ObRfqd2ewP5AAAAAwEAAQAAAQAdELqhI/RsSpO45eFR
+9hcZtnrm8WQzImrr9dfn1w9vMKSf++rHTuFIQvi48Q10ZiOGH1bbvlPAIVOqdjAPtnyzJR
+HhzmyjhjasJlk30zj+kod0kz63HzSMT9EfsYNfmYoCyMYFCKz52EU3xc87Vhi74XmZz0D0
+CgIj6TyZftmzC4YJCiwwU8K+29nxBhcbFRxpgwAksFL6PCSQsPl4y7yvXGcX+7lpZD8547
+v58q3jIkH1g2tBOusIuaiphDDStVJhVdKA55Z0Kju2kvCqsRIlf1efrq43blRgJFFFCxNZ
+8Cpolt4lOHhg+o3ucjILlCOgjDV8dB21YLxmgN5q+xFNAAAAgQC1P+eLUkHDFXnleCEVrW
+xL/DFxEyneLQz3IawGdw7cyAb7vxsYrGUvbVUFkxeiv397pDHLZ5U+t5cOYDBZ7G43Mt2g
+YfWBuRNvYhHA9Sdf38m5qPA6XCvm51f+FxInwd/kwRKH01RHJuRGsl/4Apu4DqVob8y00V
+WTYyV6JBNDkQAAAIEA322lj7ZJXfK/oLhMM/RS+DvaMea1g/q43mdRJFQQso4XRCL6IIVn
+oZXFeOxrMIRByVZBw+FSeB6OayWcZMySpJQBo70GdJOc3pJb3js0T+P2XA9+/jwXS58K9a
++IkgLkv9XkfxNGNKyPEEzXC8QQzvjs1LbmO59VLko8ypwHq/cAAACBANQqaULI0qdwa0vm
+d3Ae1+k3YLZ0kapSQGVIMT2lkrhKV35tj7HIFpUPa4vitHzcUwtjYhqFezVF+JyPbJ/Fsp
+XmEc0g1fFnQp5/SkUwoN2zm8Up52GBelkq2Jk57mOMzWO0QzzNuNV/feJk02b2aE8rrAqP
+QR+u0AypRPmzHnOPAAAAEXJvb3RAMTQwOTExNTQ5NDBkAQ==
+-----END OPENSSH PRIVATE KEY-----";
 
     #[test]
-    fn test_decode_secret_key() {
+    fn test_decode_ed25519_secret_key() {
         extern crate env_logger;
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         decode_secret_key(ED25519_KEY, Some(b"blabla")).unwrap();
     }
 
     #[test]
+    fn test_decode_rsa_secret_key() {
+        extern crate env_logger;
+        env_logger::init();
+        decode_secret_key(RSA_KEY, None).unwrap();
+    }
+
+    #[test]
     fn test_check_known_hosts() {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         let dir = tempdir::TempDir::new("thrussh").unwrap();
         let path = dir.path().join("known_hosts");
         {
@@ -506,7 +540,7 @@ e+JpiSq66Z6GIt0801skPh20jxOO3F52SoX1IeO5D5PXfZrfSZlw6S8c7bwyp2FHxDewRx
 
     #[test]
     fn test_nikao() {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         let key = "-----BEGIN RSA PRIVATE KEY-----
 MIIEpQIBAAKCAQEAw/FG8YLVoXhsUVZcWaY7iZekMxQ2TAfSVh0LTnRuzsumeLhb
 0fh4scIt4C4MLwpGe/u3vj290C28jLkOtysqnIpB4iBUrFNRmEz2YuvjOzkFE8Ju
@@ -569,7 +603,7 @@ xV/JrzLAwPoKk3bkqys3bUmgo6DxVC/6RmMwPQ0rmpw78kOgEej90g==
 
     #[test]
     fn test_loewenheim() {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         let key = "-----BEGIN RSA PRIVATE KEY-----
 Proc-Type: 4,ENCRYPTED
 DEK-Info: AES-128-CBC,80E4FCAD049EE007CCE1C65D52CDB87A
@@ -604,9 +638,47 @@ KJaj7gc0n6gmKY6r0/Ddufy1JZ6eihBCSJ64RARBXeg2rZpyT+xxhMEZLK5meOeR
         decode_secret_key(key, Some(b"passphrase")).unwrap();
     }
 
+
+    #[test]
+    fn test_o01eg() {
+        env_logger::init();
+
+        let key = "-----BEGIN RSA PRIVATE KEY-----
+Proc-Type: 4,ENCRYPTED
+DEK-Info: AES-128-CBC,EA77308AAF46981303D8C44D548D097E
+
+QR18hXmAgGehm1QMMYGF34PAtBpTj+8/ZPFx2zZxir7pzDpfYoNAIf/fzLsW1ruG
+0xo/ZK/T3/TpMgjmLsCR6q+KU4jmCcCqWQIGWYJt9ljFI5y/CXr5uqP3DKcqtdxQ
+fbBAfXJ8ITF+Tj0Cljm2S1KYHor+mkil5Lf/ZNiHxcLfoI3xRnpd+2cemN9Ly9eY
+HNTbeWbLosfjwdfPJNWFNV5flm/j49klx/UhXhr5HNFNgp/MlTrvkH4rBt4wYPpE
+cZBykt4Fo1KGl95pT22inGxQEXVHF1Cfzrf5doYWxjiRTmfhpPSz/Tt0ev3+jIb8
+Htx6N8tNBoVxwCiQb7jj3XNim2OGohIp5vgW9sh6RDfIvr1jphVOgCTFKSo37xk0
+156EoCVo3VcLf+p0/QitbUHR+RGW/PvUJV/wFR5ShYqjI+N2iPhkD24kftJ/MjPt
+AAwCm/GYoYjGDhIzQMB+FETZKU5kz23MQtZFbYjzkcI/RE87c4fkToekNCdQrsoZ
+wG0Ne2CxrwwEnipHCqT4qY+lZB9EbqQgbWOXJgxA7lfznBFjdSX7uDc/mnIt9Y6B
+MZRXH3PTfotHlHMe+Ypt5lfPBi/nruOl5wLo3L4kY5pUyqR0cXKNycIJZb/pJAnE
+ryIb59pZP7njvoHzRqnC9dycnTFW3geK5LU+4+JMUS32F636aorunRCl6IBmVQHL
+uZ+ue714fn/Sn6H4dw6IH1HMDG1hr8ozP4sNUCiAQ05LsjDMGTdrUsr2iBBpkQhu
+VhUDZy9g/5XF1EgiMbZahmqi5WaJ5K75ToINHb7RjOE7MEiuZ+RPpmYLE0HXyn9X
+HTx0ZGr022dDI6nkvUm6OvEwLUUmmGKRHKe0y1EdICGNV+HWqnlhGDbLWeMyUcIY
+M6Zh9Dw3WXD3kROf5MrJ6n9MDIXx9jy7nmBh7m6zKjBVIw94TE0dsRcWb0O1IoqS
+zLQ6ihno+KsQHDyMVLEUz1TuE52rIpBmqexDm3PdDfCgsNdBKP6QSTcoqcfHKeex
+K93FWgSlvFFQQAkJumJJ+B7ZWnK+2pdjdtWwTpflAKNqc8t//WmjWZzCtbhTHCXV
+1dnMk7azWltBAuXnjW+OqmuAzyh3ayKgqfW66mzSuyQNa1KqFhqpJxOG7IHvxVfQ
+kYeSpqODnL87Zd/dU8s0lOxz3/ymtjPMHlOZ/nHNqW90IIeUwWJKJ46Kv6zXqM1t
+MeD1lvysBbU9rmcUdop0D3MOgGpKkinR5gy4pUsARBiz4WhIm8muZFIObWes/GDS
+zmmkQRO1IcfXKAHbq/OdwbLBm4vM9nk8vPfszoEQCnfOSd7aWrLRjDR+q2RnzNzh
+K+fodaJ864JFIfB/A+aVviVWvBSt0eEbEawhTmNPerMrAQ8tRRhmNxqlDP4gOczi
+iKUmK5recsXk5us5Ik7peIR/f9GAghpoJkF0HrHio47SfABuK30pzcj62uNWGljS
+3d9UQLCepT6RiPFhks/lgimbtSoiJHql1H9Q/3q4MuO2PuG7FXzlTnui3zGw/Vvy
+br8gXU8KyiY9sZVbmplRPF+ar462zcI2kt0a18mr0vbrdqp2eMjb37QDbVBJ+rPE
+-----END RSA PRIVATE KEY-----
+";
+        decode_secret_key(key, Some(b"12345")).unwrap();
+    }
     #[test]
     fn test_pkcs8() {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         println!("test");
         decode_secret_key(PKCS8_RSA, Some(b"blabla")).unwrap();
     }
@@ -644,13 +716,13 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
 
     #[test]
     fn test_pkcs8_encrypted() {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         println!("test");
         decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
     }
 
     fn test_client_agent(key: key::KeyPair) {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         use std::process::Command;
         let dir = tempdir::TempDir::new("thrussh").unwrap();
         let agent_path = dir.path().join("agent");
@@ -695,8 +767,14 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
     }
 
     #[test]
+    fn test_client_agent_openssh_rsa() {
+        let key = decode_secret_key(RSA_KEY, None).unwrap();
+        test_client_agent(key)
+    }
+
+    #[test]
     fn test_agent() {
-        env_logger::init().unwrap_or(());
+        env_logger::init();
         let dir = tempdir::TempDir::new("thrussh").unwrap();
         let agent_path = dir.path().join("agent");
 

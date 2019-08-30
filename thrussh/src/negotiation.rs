@@ -51,7 +51,7 @@ pub struct Preferred {
 
 pub const DEFAULT: Preferred = Preferred {
     kex: &[kex::CURVE25519],
-    key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::RSA ],
+    key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA],
     cipher: &[cipher::chacha20poly1305::NAME, cipher::aes128ctr::NAME],
     mac: &["none"],
     compression: &["none"],
@@ -81,7 +81,7 @@ impl Named for PublicKey {
     fn name(&self) -> &'static str {
         match self {
             &PublicKey::Ed25519(_) => ED25519.0,
-            &PublicKey::RSA { .. } => SSH_RSA,
+            &PublicKey::RSA { .. } => SSH_RSA.0,
         }
     }
 }
@@ -100,7 +100,7 @@ pub trait Select {
 
     fn read_kex(buffer: &[u8], pref: &Preferred) -> Result<Names, Error> {
         let mut r = buffer.reader(17);
-        let kex_string = try!(r.read_string());
+        let kex_string = r.read_string()?;
         let (kex_both_first, kex_algorithm) = if let Some(x) = Self::select(pref.kex, kex_string) {
             x
         } else {
@@ -112,7 +112,7 @@ pub trait Select {
             return Err(Error::NoCommonKexAlgo);
         };
 
-        let key_string = try!(r.read_string());
+        let key_string = r.read_string()?;
         let (key_both_first, key_algorithm) = if let Some(x) = Self::select(pref.key, key_string) {
             x
         } else {
@@ -124,7 +124,7 @@ pub trait Select {
             return Err(Error::NoCommonKeyAlgo);
         };
 
-        let cipher_string = try!(r.read_string());
+        let cipher_string = r.read_string()?;
         let cipher = Self::select(pref.cipher, cipher_string);
         if cipher.is_none() {
             debug!(
@@ -134,9 +134,9 @@ pub trait Select {
             );
             return Err(Error::NoCommonCipher);
         }
-        try!(r.read_string()); // SERVER_TO_CLIENT
-        try!(r.read_string());
-        let hmac_string = try!(r.read_string()); // SERVER_TO_CLIENT
+        r.read_string()?; // SERVER_TO_CLIENT
+        r.read_string()?;
+        let hmac_string = r.read_string()?; // SERVER_TO_CLIENT
         let hmac = Self::select(pref.mac, hmac_string);
         let hmac = hmac.and_then(|(_, x)| Some(x));
         if hmac.is_none() {
@@ -147,11 +147,11 @@ pub trait Select {
             );
             return Err(Error::NoCommonHmac);
         }
-        try!(r.read_string()); //
-        try!(r.read_string()); //
-        try!(r.read_string()); //
+        r.read_string()?; //
+        r.read_string()?; //
+        r.read_string()?; //
 
-        let follows = try!(r.read_byte()) != 0;
+        let follows = r.read_byte()? != 0;
         match (cipher, hmac, follows) {
             (Some((_, cip)), mac, fol) => {
                 Ok(Names {

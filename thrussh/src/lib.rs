@@ -361,7 +361,7 @@ impl<T, E> FromFinished<T, E> for futures::Finished<T, E> {
     }
 }
 
-impl<T: 'static, E: 'static> FromFinished<T, E> for Box<futures::Future<Item = T, Error = E>> {
+impl<T: 'static, E: 'static> FromFinished<T, E> for Box<dyn futures::Future<Item = T, Error = E>> {
     fn finished(t: T) -> Self {
         Box::new(futures::finished(t))
     }
@@ -514,7 +514,7 @@ impl std::error::Error for Error {
             Error::Timer(ref e) => e.description(),
         }
     }
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         match *self {
             Error::Utf8(ref e) => Some(e),
             Error::IO(ref e) => Some(e),
@@ -535,7 +535,7 @@ impl<E:std::error::Error> std::error::Error for HandlerError<E> {
             HandlerError::Handler(ref e) => e.description(),
         }
     }
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         match *self {
             HandlerError::Error(ref e) => e.source(),
             HandlerError::Handler(ref e) => e.source(),
@@ -740,7 +740,7 @@ impl<'a> Sig<'a> {
             b"SEGV" => Ok(Sig::SEGV),
             b"TERM" => Ok(Sig::TERM),
             b"USR1" => Ok(Sig::USR1),
-            x => Ok(Sig::Custom(try!(std::str::from_utf8(x)))),
+            x => Ok(Sig::Custom(std::str::from_utf8(x)?)),
         }
     }
 }

@@ -59,7 +59,7 @@ impl<R: AsyncRead + AsyncWrite + Tcp, H: Handler> Future for Connection<R, H> {
         loop {
             // If timeout, shutdown the socket.
             if let Some(ref mut timeout) = self.timeout {
-                match try!(timeout.poll()) {
+                match timeout.poll()? {
                     Async::Ready(()) => {
                         // try_nb!(self.stream.get_mut().shutdown(std::net::Shutdown::Both));
                         debug!("Disconnected, shutdown");
@@ -335,7 +335,7 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
                 session,
             } => {
                 debug!("future: rejectTimeout");
-                match try!(timeout.poll()) {
+                match timeout.poll()? {
                     Async::Ready(()) => (handler, session),
                     Async::NotReady => {
                         self.state = Some(ConnectionState::Pending {
@@ -395,7 +395,7 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
             }
             PendingFuture::Authenticated(mut r) => {
                 debug!("future: authenticated");
-                if let Async::Ready((handler, session)) = try!(r.poll()) {
+                if let Async::Ready((handler, session)) = r.poll()? {
                     (handler, session)
                 } else {
                     self.state = Some(ConnectionState::Pending {

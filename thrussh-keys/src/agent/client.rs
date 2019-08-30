@@ -191,7 +191,6 @@ impl<S: AsyncRead+AsyncWrite> AgentClient<S> {
     /// Send a key to the agent, with a (possibly empty) slice of
     /// constraints to apply when using the key to sign.
     pub fn add_identity(mut self, key: &key::KeyPair, constraints: &[Constraint]) -> ReadResponse<S> {
-        use encoding::Encoding;
         self.buf.clear();
         self.buf.resize(4);
         if constraints.is_empty() {
@@ -244,7 +243,6 @@ impl<S: AsyncRead+AsyncWrite> AgentClient<S> {
     /// Add a smart card to the agent, with a (possibly empty) set of
     /// constraints to apply when signing.
     pub fn add_smartcard_key(mut self, id: &str, pin: &[u8], constraints: &[Constraint]) -> ReadResponse<S> {
-        use encoding::Encoding;
         self.buf.clear();
         self.buf.resize(4);
         if constraints.is_empty() {
@@ -278,7 +276,6 @@ impl<S: AsyncRead+AsyncWrite> AgentClient<S> {
 
     /// Lock the agent, making it refuse to sign until unlocked.
     pub fn lock(mut self, passphrase: &[u8]) -> ReadResponse<S> {
-        use encoding::Encoding;
         self.buf.clear();
         self.buf.resize(4);
         self.buf.push(msg::LOCK);
@@ -290,7 +287,6 @@ impl<S: AsyncRead+AsyncWrite> AgentClient<S> {
 
     /// Unlock the agent, allowing it to sign again.
     pub fn unlock(mut self, passphrase: &[u8]) -> ReadResponse<S> {
-        use encoding::Encoding;
         self.buf.clear();
         self.buf.resize(4);
         self.buf.push(msg::UNLOCK);

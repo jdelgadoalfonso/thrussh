@@ -202,10 +202,10 @@ impl super::session::Session {
             msg::CHANNEL_OPEN_CONFIRMATION => {
                 debug!("channel_open_confirmation");
                 let mut reader = buf.reader(1);
-                let id_send = ChannelId(try!(reader.read_u32()));
-                let id_recv = try!(reader.read_u32());
-                let window = try!(reader.read_u32());
-                let max_packet = try!(reader.read_u32());
+                let id_send = ChannelId(reader.read_u32()?);
+                let id_recv = reader.read_u32()?;
+                let window = reader.read_u32()?;
+                let max_packet = reader.read_u32()?;
 
                 if let Some(ref mut enc) = self.0.encrypted {
 
@@ -228,7 +228,7 @@ impl super::session::Session {
             msg::CHANNEL_CLOSE => {
                 debug!("channel_close");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
+                let channel_num = ChannelId(r.read_u32()?);
                 if let Some(ref mut enc) = self.0.encrypted {
                     enc.channels.remove(&channel_num);
                 }
@@ -239,7 +239,7 @@ impl super::session::Session {
             msg::CHANNEL_EOF => {
                 debug!("channel_close");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
+                let channel_num = ChannelId(r.read_u32()?);
                 Ok(PendingFuture::SessionUnit(
                     client.channel_eof(channel_num, self),
                 ))
@@ -247,10 +247,10 @@ impl super::session::Session {
             msg::CHANNEL_OPEN_FAILURE => {
                 debug!("channel_open_failure");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let reason_code = ChannelOpenFailure::from_u32(try!(r.read_u32())).unwrap();
-                let descr = try!(std::str::from_utf8(try!(r.read_string())));
-                let language = try!(std::str::from_utf8(try!(r.read_string())));
+                let channel_num = ChannelId(r.read_u32()?);
+                let reason_code = ChannelOpenFailure::from_u32(r.read_u32()?).unwrap();
+                let descr = std::str::from_utf8(r.read_string()?)?;
+                let language = std::str::from_utf8(r.read_string()?)?;
                 if let Some(ref mut enc) = self.0.encrypted {
                     enc.channels.remove(&channel_num);
                 }
@@ -265,8 +265,8 @@ impl super::session::Session {
             msg::CHANNEL_DATA => {
                 debug!("channel_data");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let data = try!(r.read_string());
+                let channel_num = ChannelId(r.read_u32()?);
+                let data = r.read_string()?;
                 let target = self.0.config.window_size;
                 if let Some(ref mut enc) = self.0.encrypted {
                     enc.adjust_window_size(channel_num, data, target);
@@ -277,9 +277,9 @@ impl super::session::Session {
             msg::CHANNEL_EXTENDED_DATA => {
                 debug!("channel_extended_data");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let extended_code = try!(r.read_u32());
-                let data = try!(r.read_string());
+                let channel_num = ChannelId(r.read_u32()?);
+                let extended_code = r.read_u32()?;
+                let data = r.read_string()?;
                 let target = self.0.config.window_size;
                 if let Some(ref mut enc) = self.0.encrypted {
                     enc.adjust_window_size(channel_num, data, target);
@@ -290,14 +290,14 @@ impl super::session::Session {
             msg::CHANNEL_REQUEST => {
                 debug!("channel_request");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let req = try!(r.read_string());
+                let channel_num = ChannelId(r.read_u32()?);
+                let req = r.read_string()?;
                 match req {
                     b"forwarded_tcpip" => {
-                        let a = try!(std::str::from_utf8(try!(r.read_string())));
-                        let b = try!(r.read_u32());
-                        let c = try!(std::str::from_utf8(try!(r.read_string())));
-                        let d = try!(r.read_u32());
+                        let a = std::str::from_utf8(r.read_string()?)?;
+                        let b = r.read_u32()?;
+                        let c = std::str::from_utf8(r.read_string()?)?;
+                        let d = r.read_u32()?;
                         Ok(PendingFuture::SessionUnit(
                             client.channel_open_forwarded_tcpip(
                                 channel_num,
@@ -310,25 +310,25 @@ impl super::session::Session {
                         ))
                     }
                     b"xon-xoff" => {
-                        try!(r.read_byte()); // should be 0.
-                        let client_can_do = try!(r.read_byte());
+                        r.read_byte()?; // should be 0.
+                        let client_can_do = r.read_byte()?;
                         Ok(PendingFuture::SessionUnit(
                             client.xon_xoff(channel_num, client_can_do != 0, self),
                         ))
                     }
                     b"exit-status" => {
-                        try!(r.read_byte()); // should be 0.
-                        let exit_status = try!(r.read_u32());
+                        r.read_byte()?; // should be 0.
+                        let exit_status = r.read_u32()?;
                         Ok(PendingFuture::SessionUnit(
                             client.exit_status(channel_num, exit_status, self),
                         ))
                     }
                     b"exit-signal" => {
-                        try!(r.read_byte()); // should be 0.
-                        let signal_name = try!(Sig::from_name(try!(r.read_string())));
-                        let core_dumped = try!(r.read_byte());
-                        let error_message = try!(std::str::from_utf8(try!(r.read_string())));
-                        let lang_tag = try!(std::str::from_utf8(try!(r.read_string())));
+                        r.read_byte()?; // should be 0.
+                        let signal_name = Sig::from_name(r.read_string()?)?;
+                        let core_dumped = r.read_byte()?;
+                        let error_message = std::str::from_utf8(r.read_string()?)?;
+                        let lang_tag = std::str::from_utf8(r.read_string()?)?;
                         Ok(PendingFuture::SessionUnit(client.exit_signal(
                             channel_num,
                             signal_name,
@@ -347,8 +347,8 @@ impl super::session::Session {
             msg::CHANNEL_WINDOW_ADJUST => {
                 debug!("channel_window_adjust");
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let amount = try!(r.read_u32());
+                let channel_num = ChannelId(r.read_u32()?);
+                let amount = r.read_u32()?;
                 let mut new_value = 0;
                 debug!("amount: {:?}", amount);
                 if let Some(ref mut enc) = self.0.encrypted {
@@ -367,7 +367,7 @@ impl super::session::Session {
             }
             msg::GLOBAL_REQUEST => {
                 let mut r = buf.reader(1);
-                let req = try!(r.read_string());
+                let req = r.read_string()?;
                 info!("Unhandled global request: {:?}", std::str::from_utf8(req));
                 Ok(PendingFuture::Done(client, self))
             }
@@ -412,7 +412,7 @@ impl Encrypted {
                     self.write.extend_ssh_string(user.as_bytes());
                     self.write.extend_ssh_string(SSH_CONNECTION);
                     self.write.extend_ssh_string(b"password");
-                    self.write.push(1);
+                    self.write.push(0);
                     self.write.extend_ssh_string(password.as_bytes());
                     true
                 }

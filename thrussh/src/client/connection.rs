@@ -612,7 +612,7 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
             buffer: CryptoVec::new(),
         };
         if let Some(ref mut s) = connection.session {
-            try!(s.flush())
+            s.flush()?
         }
         Ok(connection)
     }

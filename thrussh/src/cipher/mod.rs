@@ -41,7 +41,7 @@ pub enum OpeningCipher {
 }
 
 impl<'a> OpeningCipher {
-    fn as_opening_key(&self) -> &OpeningKey {
+    fn as_opening_key(&self) -> &dyn OpeningKey {
         match *self {
             OpeningCipher::Clear(ref key) => key,
             OpeningCipher::Chacha20Poly1305(ref key) => key,
@@ -57,7 +57,7 @@ pub enum SealingCipher {
 }
 
 impl<'a> SealingCipher {
-    fn as_sealing_key(&'a self) -> &'a SealingKey {
+    fn as_sealing_key(&'a self) -> &'a dyn SealingKey {
         match *self {
             SealingCipher::Clear(ref key) => key,
             SealingCipher::Chacha20Poly1305(ref key) => key,

@@ -1,6 +1,6 @@
 [package]
 name = "thrussh-libsodium"
-version = "0.1.3"
+version = "0.1.4"
 license = "Apache-2.0/MIT"
 description = "Straightforward bindings to libsodium"
 homepage = "https://nest.pijul.com/pijul_org/thrussh"

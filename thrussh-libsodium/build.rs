@@ -13,7 +13,7 @@ fn main() {
             Some(_) => "static",
             None => "dylib",
         };
-        println!("cargo:rustc-link-lib={}=libsodium", mode);
+        println!("cargo:rustc-link-lib={}=sodium", mode);
 
     } else {
 

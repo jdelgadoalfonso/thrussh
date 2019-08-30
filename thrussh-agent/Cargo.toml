@@ -8,7 +8,7 @@ repository = "https://nest.pijul.com/pijul_org/thrussh"
 include = [ "Cargo.toml", "src/thrussh-agent.rs", "src/thrussh-add.rs" ]
 
 [dependencies]
-thrussh-keys = "0.11.3"
+thrussh-keys = "0.11"
 futures = "0.1"
 tokio-uds = "0.2"
 tokio = "0.1"

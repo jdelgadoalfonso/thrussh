@@ -44,10 +44,10 @@ impl Session {
             if let Some(exchange) = enc.exchange.take() {
                 let kexinit = KexInit::received_rekey(
                     exchange,
-                    try!(negotiation::Server::read_kex(
+                    negotiation::Server::read_kex(
                         buf,
                         &self.common.config.as_ref().preferred,
-                    )),
+                    )?,
                     &enc.session_id,
                 );
                 self.common.kex = Some(kexinit.server_parse(
@@ -77,7 +77,7 @@ impl Session {
             Some(EncryptedState::WaitingServiceRequest) if buf[0] == msg::SERVICE_REQUEST => {
 
                 let mut r = buf.reader(1);
-                let request = try!(r.read_string());
+                let request = r.read_string()?;
                 debug!("request: {:?}", std::str::from_utf8(request));
                 if request == b"ssh-userauth" {
 
@@ -107,12 +107,12 @@ impl Session {
                         auth_request: auth_request,
                     });
                 } else if buf[0] == msg::USERAUTH_INFO_RESPONSE {
-                    let auth_request = try!(enc.read_userauth_info_response(
+                    let auth_request = enc.read_userauth_info_response(
                         handler,
                         &mut self.common.auth_user,
                         auth_request,
                         buf,
-                    ));
+                    )?;
                     self.common.encrypted = Some(enc);
                     return Ok(PendingFuture::ReadAuthRequest {
                         session: self,
@@ -155,12 +155,12 @@ impl Session {
         match buf[0] {
             msg::CHANNEL_OPEN => {
                 Ok(Authenticated::FutureUnit(
-                    try!(self.server_handle_channel_open(handler, buf)),
+                    self.server_handle_channel_open(handler, buf)?,
                 ))
             }
             msg::CHANNEL_CLOSE => {
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
+                let channel_num = ChannelId(r.read_u32()?);
                 if let Some(ref mut enc) = self.common.encrypted {
                     enc.channels.remove(&channel_num);
                 }
@@ -171,7 +171,7 @@ impl Session {
             }
             msg::CHANNEL_EOF => {
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
+                let channel_num = ChannelId(r.read_u32()?);
                 debug!("handler.channel_eof {:?}", channel_num);
                 Ok(Authenticated::future_unit(
                     handler.channel_eof(channel_num, self),
@@ -180,15 +180,15 @@ impl Session {
             msg::CHANNEL_EXTENDED_DATA |
             msg::CHANNEL_DATA => {
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
+                let channel_num = ChannelId(r.read_u32()?);
 
                 let ext = if buf[0] == msg::CHANNEL_DATA {
                     None
                 } else {
-                    Some(try!(r.read_u32()))
+                    Some(r.read_u32()?)
                 };
                 debug!("handler.data {:?} {:?}", ext, channel_num);
-                let data = try!(r.read_string());
+                let data = r.read_string()?;
                 let target = self.common.config.window_size;
                 if let Some(ref mut enc) = self.common.encrypted {
                     enc.adjust_window_size(channel_num, data, target);
@@ -207,8 +207,8 @@ impl Session {
 
             msg::CHANNEL_WINDOW_ADJUST => {
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let amount = try!(r.read_u32());
+                let channel_num = ChannelId(r.read_u32()?);
+                let amount = r.read_u32()?;
                 let mut new_value = 0;
                 if let Some(ref mut enc) = self.common.encrypted {
                     if let Some(channel) = enc.channels.get_mut(&channel_num) {
@@ -228,9 +228,9 @@ impl Session {
 
             msg::CHANNEL_REQUEST => {
                 let mut r = buf.reader(1);
-                let channel_num = ChannelId(try!(r.read_u32()));
-                let req_type = try!(r.read_string());
-                let wants_reply = try!(r.read_byte());
+                let channel_num = ChannelId(r.read_u32()?);
+                let req_type = r.read_string()?;
+                let wants_reply = r.read_byte()?;
                 if let Some(ref mut enc) = self.common.encrypted {
                     if let Some(channel) = enc.channels.get_mut(&channel_num) {
                         channel.wants_reply = wants_reply != 0;
@@ -238,15 +238,15 @@ impl Session {
                 }
                 match req_type {
                     b"pty-req" => {
-                        let term = try!(std::str::from_utf8(try!(r.read_string())));
-                        let col_width = try!(r.read_u32());
-                        let row_height = try!(r.read_u32());
-                        let pix_width = try!(r.read_u32());
-                        let pix_height = try!(r.read_u32());
+                        let term = std::str::from_utf8(r.read_string()?)?;
+                        let col_width = r.read_u32()?;
+                        let row_height = r.read_u32()?;
+                        let pix_width = r.read_u32()?;
+                        let pix_height = r.read_u32()?;
                         let mut modes = [(Pty::TTY_OP_END, 0); 130];
                         let mut i = 0;
                         {
-                            let mode_string = try!(r.read_string());
+                            let mode_string = r.read_string()?;
                             while 5 * i < mode_string.len() {
                                 let code = mode_string[5 * i];
                                 if code == 0 {
@@ -275,10 +275,10 @@ impl Session {
                         )))
                     }
                     b"x11-req" => {
-                        let single_connection = try!(r.read_byte()) != 0;
-                        let x11_auth_protocol = try!(std::str::from_utf8(try!(r.read_string())));
-                        let x11_auth_cookie = try!(std::str::from_utf8(try!(r.read_string())));
-                        let x11_screen_number = try!(r.read_u32());
+                        let single_connection = r.read_byte()? != 0;
+                        let x11_auth_protocol = std::str::from_utf8(r.read_string()?)?;
+                        let x11_auth_cookie = std::str::from_utf8(r.read_string()?)?;
+                        let x11_screen_number = r.read_u32()?;
                         debug!("handler.x11_request {:?}", channel_num);
                         Ok(Authenticated::future_unit(handler.x11_request(
                             channel_num,
@@ -290,8 +290,8 @@ impl Session {
                         )))
                     }
                     b"env" => {
-                        let env_variable = try!(std::str::from_utf8(try!(r.read_string())));
-                        let env_value = try!(std::str::from_utf8(try!(r.read_string())));
+                        let env_variable = std::str::from_utf8(r.read_string()?)?;
+                        let env_value = std::str::from_utf8(r.read_string()?)?;
                         debug!("handler.env_request {:?}", channel_num);
                         Ok(Authenticated::future_unit(handler.env_request(
                             channel_num,
@@ -307,24 +307,24 @@ impl Session {
                         ))
                     }
                     b"exec" => {
-                        let req = try!(r.read_string());
+                        let req = r.read_string()?;
                         debug!("handler.exec_request {:?}", channel_num);
                         Ok(Authenticated::future_unit(
                             handler.exec_request(channel_num, req, self),
                         ))
                     }
                     b"subsystem" => {
-                        let name = try!(std::str::from_utf8(try!(r.read_string())));
+                        let name = std::str::from_utf8(r.read_string()?)?;
                         debug!("handler.subsystem_request {:?}", channel_num);
                         Ok(Authenticated::future_unit(
                             handler.subsystem_request(channel_num, name, self),
                         ))
                     }
-                    b"window_change" => {
-                        let col_width = try!(r.read_u32());
-                        let row_height = try!(r.read_u32());
-                        let pix_width = try!(r.read_u32());
-                        let pix_height = try!(r.read_u32());
+                    b"window-change" => {
+                        let col_width = r.read_u32()?;
+                        let row_height = r.read_u32()?;
+                        let pix_width = r.read_u32()?;
+                        let pix_height = r.read_u32()?;
                         debug!("handler.window_change {:?}", channel_num);
                         Ok(Authenticated::future_unit(handler.window_change_request(
                             channel_num,
@@ -336,8 +336,8 @@ impl Session {
                         )))
                     }
                     b"signal" => {
-                        try!(r.read_byte()); // should be 0.
-                        let signal_name = try!(Sig::from_name(try!(r.read_string())));
+                        r.read_byte()?; // should be 0.
+                        let signal_name = Sig::from_name(r.read_string()?)?;
                         debug!("handler.signal {:?} {:?}", channel_num, signal_name);
                         Ok(Authenticated::future_unit(
                             handler.signal(channel_num, signal_name, self),
@@ -363,20 +363,20 @@ impl Session {
             }
             msg::GLOBAL_REQUEST => {
                 let mut r = buf.reader(1);
-                let req_type = try!(r.read_string());
-                self.common.wants_reply = try!(r.read_byte()) != 0;
+                let req_type = r.read_string()?;
+                self.common.wants_reply = r.read_byte()? != 0;
                 match req_type {
                     b"tcpip-forward" => {
-                        let address = try!(std::str::from_utf8(try!(r.read_string())));
-                        let port = try!(r.read_u32());
+                        let address = std::str::from_utf8(r.read_string()?)?;
+                        let port = r.read_u32()?;
                         debug!("handler.tcpip_forward {:?} {:?}", address, port);
                         Ok(Authenticated::Forward(Forward {
                             forward: handler.tcpip_forward(address, port, self),
                         }))
                     }
                     b"cancel-tcpip-forward" => {
-                        let address = try!(std::str::from_utf8(try!(r.read_string())));
-                        let port = try!(r.read_u32());
+                        let address = std::str::from_utf8(r.read_string()?)?;
+                        let port = r.read_u32()?;
                         debug!("handler.cancel_tcpip_forward {:?} {:?}", address, port);
                         Ok(Authenticated::Forward(Forward {
                             forward: handler.cancel_tcpip_forward(address, port, self),
@@ -411,10 +411,10 @@ impl Session {
 
         // https://tools.ietf.org/html/rfc4254#section-5.1
         let mut r = buf.reader(1);
-        let typ = try!(r.read_string());
-        let sender = try!(r.read_u32());
-        let window = try!(r.read_u32());
-        let maxpacket = try!(r.read_u32());
+        let typ = r.read_string()?;
+        let sender = r.read_u32()?;
+        let window = r.read_u32()?;
+        let maxpacket = r.read_u32()?;
 
         let sender_channel = if let Some(ref mut enc) = self.common.encrypted {
             enc.new_channel_id()
@@ -441,16 +441,16 @@ impl Session {
             }
             b"x11" => {
                 self.confirm_channel_open(channel);
-                let a = try!(std::str::from_utf8(try!(r.read_string())));
-                let b = try!(r.read_u32());
+                let a = std::str::from_utf8(r.read_string()?)?;
+                let b = r.read_u32()?;
                 FutureUnit::H(handler.channel_open_x11(sender_channel, a, b, self))
             }
             b"direct-tcpip" => {
                 self.confirm_channel_open(channel);
-                let a = try!(std::str::from_utf8(try!(r.read_string())));
-                let b = try!(r.read_u32());
-                let c = try!(std::str::from_utf8(try!(r.read_string())));
-                let d = try!(r.read_u32());
+                let a = std::str::from_utf8(r.read_string()?)?;
+                let b = r.read_u32()?;
+                let c = std::str::from_utf8(r.read_string()?)?;
+                let d = r.read_u32()?;
                 FutureUnit::H(handler.channel_open_direct_tcpip(
                     sender_channel,
                     a,
@@ -751,10 +751,10 @@ impl Encrypted {
 
         // https://tools.ietf.org/html/rfc4252#section-5
         let mut r = buf.reader(1);
-        let user = try!(r.read_string());
-        let user = try!(std::str::from_utf8(user));
-        let service_name = try!(r.read_string());
-        let method = try!(r.read_string());
+        let user = r.read_string()?;
+        let user = std::str::from_utf8(user)?;
+        let service_name = r.read_string()?;
+        let method = r.read_string()?;
         debug!(
             "name: {:?} {:?} {:?}",
             user,
@@ -769,9 +769,9 @@ impl Encrypted {
                 auth_user.clear();
                 auth_user.push_str(user);
 
-                try!(r.read_byte());
-                let password = try!(r.read_string());
-                let password = try!(std::str::from_utf8(password));
+                r.read_byte()?;
+                let password = r.read_string()?;
+                let password = std::str::from_utf8(password)?;
 
                 Ok(ReadAuthRequest::Req {
                     future: FutureAuth::Password(handler.auth_password(user, password)),
@@ -780,9 +780,9 @@ impl Encrypted {
 
             } else if method == b"publickey" {
 
-                let is_real = try!(r.read_byte());
-                let pubkey_algo = try!(r.read_string());
-                let pubkey_key = try!(r.read_string());
+                let is_real = r.read_byte()?;
+                let pubkey_algo = r.read_string()?;
+                let pubkey_key = r.read_string()?;
                 debug!("algo: {:?}, key: {:?}", pubkey_algo, pubkey_key);
                 match key::PublicKey::parse(pubkey_algo, pubkey_key) {
                     Ok(pubkey) => {
@@ -800,11 +800,11 @@ impl Encrypted {
                                 false
                             };
 
-                            let signature = try!(r.read_string());
+                            let signature = r.read_string()?;
                             let mut s = signature.reader(0);
-                            let algo_ = try!(s.read_string());
+                            let algo_ = s.read_string()?;
                             debug!("algo_: {:?}", algo_);
-                            let sig = try!(s.read_string());
+                            let sig = s.read_string()?;
                             let init = &buf[0..pos0];
 
                             let validate = if sent_pk_ok && user == auth_user {
@@ -856,8 +856,8 @@ impl Encrypted {
 
                 auth_user.clear();
                 auth_user.push_str(user);
-                let _ = try!(r.read_string()); // language_tag, deprecated.
-                let submethods = try!(std::str::from_utf8(try!(r.read_string())));
+                let _ = r.read_string()?; // language_tag, deprecated.
+                let submethods = std::str::from_utf8(r.read_string()?)?;
                 debug!("{:?}", submethods);
                 auth_request.current = Some(CurrentRequest::KeyboardInteractive {
                     submethods: submethods.to_string(),
@@ -891,7 +891,7 @@ impl Encrypted {
             auth_request.current
         {
             let mut r = b.reader(1);
-            let n = try!(r.read_u32());
+            let n = r.read_u32()?;
             let response = Response { pos: r, n: n };
             handler.auth_keyboard_interactive(user, submethods, Some(response))
         } else {
