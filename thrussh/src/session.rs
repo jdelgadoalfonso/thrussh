@@ -18,6 +18,7 @@ use auth;
 use negotiation;
 use kex;
 use cipher;
+use mac;
 use msg;
 use {Error, ChannelId, Channel, Disconnect};
 use cryptovec::CryptoVec;
@@ -38,7 +39,7 @@ pub(crate) struct Encrypted {
     pub exchange: Option<Exchange>,
     pub kex: kex::Algorithm,
     pub key: usize,
-    pub mac: Option<&'static str>,
+    pub mac: mac::Name,
     pub session_id: hash::DigestBytes,
     pub rekey: Option<Kex>,
     pub channels: HashMap<ChannelId, Channel>,

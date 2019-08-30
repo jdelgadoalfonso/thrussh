@@ -18,7 +18,7 @@ use kex;
 use cipher;
 use msg;
 use std::str::from_utf8;
-// use super::mac; // unimplemented
+use mac; // unimplemented
 // use super::compression; // unimplemented
 use cryptovec::CryptoVec;
 use thrussh_keys::encoding::{Encoding, Reader};
@@ -30,7 +30,7 @@ pub struct Names {
     pub kex: kex::Name,
     pub key: key::Name,
     pub cipher: cipher::Name,
-    pub mac: Option<&'static str>,
+    pub mac: mac::Name,
     pub ignore_guessed: bool,
 }
 
@@ -44,7 +44,7 @@ pub struct Preferred {
     /// Preferred symmetric ciphers.
     pub cipher: &'static [cipher::Name],
     /// Preferred MAC algorithms.
-    pub mac: &'static [&'static str],
+    pub mac: &'static [mac::Name],
     /// Preferred compression algorithms.
     pub compression: &'static [&'static str],
 }
@@ -53,7 +53,7 @@ pub const DEFAULT: Preferred = Preferred {
     kex: &[kex::CURVE25519],
     key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA],
     cipher: &[cipher::chacha20poly1305::NAME, cipher::aes128ctr::NAME],
-    mac: &["none"],
+    mac: &[mac::HMAC_SHA2_256],
     compression: &["none"],
 };
 
@@ -153,7 +153,7 @@ pub trait Select {
 
         let follows = r.read_byte()? != 0;
         match (cipher, hmac, follows) {
-            (Some((_, cip)), mac, fol) => {
+            (Some((_, cip)), Some(mac), fol) => {
                 Ok(Names {
                     kex: kex_algorithm,
                     key: key_algorithm,

@@ -292,6 +292,9 @@ extern crate byteorder;
 
 extern crate cryptovec;
 
+extern crate hmac;
+extern crate sha2;
+
 extern crate tokio;
 extern crate tokio_io;
 #[macro_use]
@@ -307,6 +310,7 @@ mod sshbuffer;
 mod ssh_read;
 mod tcp;
 mod key;
+mod mac;
 
 pub use tcp::Tcp;
 
