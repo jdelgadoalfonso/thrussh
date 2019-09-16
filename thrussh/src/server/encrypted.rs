@@ -52,7 +52,8 @@ impl Session {
                 );
                 self.common.kex = Some(kexinit.server_parse(
                     self.common.config.as_ref(),
-                    &mut self.common.cipher,
+                    &mut (self.common.cipher.lock().unwrap()),
+                    &self.common.mac,
                     buf,
                     &mut self.common.write_buffer,
                 )?);

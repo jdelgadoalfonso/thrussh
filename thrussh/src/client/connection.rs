@@ -1,8 +1,9 @@
 use super::*;
 use cipher;
+use mac;
 use msg;
 use thrussh_keys::encoding::Reader;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use ssh_read::SshRead;
 use tcp::Tcp;
@@ -157,7 +158,9 @@ impl<
                             let mut buf = self.read_buffer.take().unwrap();
                             buf.buffer.clear();
                             self.state = Some(ConnectionState::Read(
-                                cipher::read(stream, buf, session.0.cipher.clone()),
+                                cipher::read(
+                                    stream, buf, session.0.cipher.clone(), session.0.mac.clone()
+                                ),
                             ));
                         }
                     }
@@ -184,7 +187,9 @@ impl<
                         let session = self.session.as_ref().unwrap();
                         buf.buffer.clear();
                         self.state = Some(ConnectionState::Read(
-                            cipher::read(stream, buf, session.0.cipher.clone()),
+                            cipher::read(
+                                stream, buf, session.0.cipher.clone(), session.0.mac.clone()
+                            ),
                         ));
                         return Ok(Async::Ready(Status::Ok));
                     } else {
@@ -226,7 +231,7 @@ impl<
 }
 
 
-impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
+impl<R: AsyncRead + AsyncWrite, H:Handler> Connection<R, H> {
     fn poll_pending(
         &mut self,
         pending: PendingFuture<H>,
@@ -352,7 +357,8 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
                 {
                     let kexdhdone = kexinit.client_parse(
                         session.0.config.as_ref(),
-                        &session.0.cipher,
+                        &mut session.0.cipher.lock().unwrap(),
+                        &session.0.mac,
                         buf,
                         &mut session.0.write_buffer,
                     );
@@ -422,7 +428,8 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
                 );
                 // Ok, NEWKEYS received, now encrypted.
                 let p = b"\x05\0\0\0\x0Cssh-userauth";
-                session.0.cipher.write(p, &mut session.0.write_buffer);
+                session.0.cipher.lock().unwrap()
+                    .write(p, &mut session.0.write_buffer, &session.0.mac);
                 session.flush()?;
                 self.state = Some(ConnectionState::Write(
                     session.0.write_buffer.write_all(stream),
@@ -542,9 +549,10 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
                 buffer,
                 false,
             )?;
-            session.0.cipher.write(
+            session.0.cipher.lock().unwrap().write(
                 &[msg::NEWKEYS],
                 &mut session.0.write_buffer,
+                &session.0.mac,
             );
             newkeys.sent = true;
             session.0.kex = Some(Kex::NewKeys(newkeys));
@@ -600,7 +608,8 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
                 kex: None,
                 auth_user: String::new(),
                 auth_method: None, // Client only.
-                cipher: Arc::new(cipher::CLEAR_PAIR),
+                cipher: Arc::new(Mutex::new(cipher::CLEAR_PAIR)),
+                mac: Arc::new(mac::CLEAR_PAIR),
                 encrypted: None,
                 config: config,
                 wants_reply: false,
@@ -634,7 +643,8 @@ impl<R: AsyncRead + AsyncWrite, H: Handler> Connection<R, H> {
             };
             kexinit.client_write(
                 s.0.config.as_ref(),
-                &mut s.0.cipher,
+                &mut s.0.cipher.lock().unwrap(),
+                &s.0.mac,
                 &mut s.0.write_buffer,
             )?;
             s.0.kex = Some(Kex::KexInit(kexinit));

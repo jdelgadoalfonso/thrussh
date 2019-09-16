@@ -193,12 +193,12 @@ pub mod scalarmult {
 
 pub mod aes_128_ctr {
     use super::*;
-    use aes_ctr::Aes128Ctr;
-    use aes_ctr::stream_cipher::{
-        NewStreamCipher, SyncStreamCipher, generic_array::GenericArray
+    pub use aes_ctr::Aes128Ctr;
+    pub use aes_ctr::stream_cipher::{
+        NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek, generic_array::GenericArray
     };
 
-    pub const NONCE_BYTES: usize = 4;
+    pub const NONCE_BYTES: usize = 16;
     pub const KEY_BYTES: usize = 16;
     pub struct Nonce(pub [u8; NONCE_BYTES]);
     pub struct Key(pub [u8; KEY_BYTES]);

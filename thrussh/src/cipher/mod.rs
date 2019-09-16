@@ -20,8 +20,9 @@ use std::num::Wrapping;
 use tokio::io::AsyncRead;
 use read_exact_from::*;
 use futures::{Future, Async, Poll};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use cryptovec::CryptoVec;
+use mac::MacPair;
 
 pub mod chacha20poly1305;
 pub mod aes128ctr;
@@ -30,8 +31,9 @@ pub mod clear;
 pub struct Cipher {
     pub name: Name,
     pub key_len: usize,
-    pub make_opening_cipher: fn(key: &[u8]) -> OpeningCipher,
-    pub make_sealing_cipher: fn(key: &[u8]) -> SealingCipher,
+    pub iv_len: Option<usize>,
+    pub make_opening_cipher: fn(key: &[u8], iv: Option<&[u8]>) -> OpeningCipher,
+    pub make_sealing_cipher: fn(key: &[u8], iv: Option<&[u8]>) -> SealingCipher,
 }
 
 pub enum OpeningCipher {
@@ -41,11 +43,11 @@ pub enum OpeningCipher {
 }
 
 impl<'a> OpeningCipher {
-    fn as_opening_key(&self) -> &dyn OpeningKey {
+    fn as_opening_key(&'a mut self) -> &'a mut dyn OpeningKey {
         match *self {
-            OpeningCipher::Clear(ref key) => key,
-            OpeningCipher::Chacha20Poly1305(ref key) => key,
-            OpeningCipher::Aes128Ctr(ref key) => key,
+            OpeningCipher::Clear(ref mut key) => key,
+            OpeningCipher::Chacha20Poly1305(ref mut key) => key,
+            OpeningCipher::Aes128Ctr(ref mut key) => key,
         }
     }
 }
@@ -57,11 +59,11 @@ pub enum SealingCipher {
 }
 
 impl<'a> SealingCipher {
-    fn as_sealing_key(&'a self) -> &'a dyn SealingKey {
+    fn as_sealing_key(&'a mut self) -> &'a mut dyn SealingKey {
         match *self {
-            SealingCipher::Clear(ref key) => key,
-            SealingCipher::Chacha20Poly1305(ref key) => key,
-            SealingCipher::Aes128Ctr(ref key) => key,
+            SealingCipher::Clear(ref mut key) => key,
+            SealingCipher::Chacha20Poly1305(ref mut key) => key,
+            SealingCipher::Aes128Ctr(ref mut key) => key,
         }
     }
 }
@@ -92,12 +94,12 @@ pub const CLEAR_PAIR: CipherPair = CipherPair {
 
 pub trait OpeningKey {
 
-    fn decrypt_packet_length(&self, seqn: u32, encrypted_packet_length: [u8; 4]) -> [u8; 4];
+    fn decrypt_packet_length(&mut self, seqn: u32, encrypted_packet_length: [u8; 4]) -> [u8; 4];
 
     fn tag_len(&self) -> usize;
 
     fn open<'a>(
-        &self,
+        &mut self,
         seqn: u32,
         ciphertext_in_plaintext_out: &'a mut [u8],
         tag: &[u8],
@@ -112,19 +114,21 @@ pub trait SealingKey {
 
     fn tag_len(&self) -> usize;
 
-    fn seal(&self, seqn: u32, plaintext_in_ciphertext_out: &mut [u8], tag_out: &mut [u8]);
+    fn seal(&mut self, seqn: u32, plaintext_in_ciphertext_out: &mut [u8], tag_out: &mut [u8]);
 }
 
 enum CipherReadState<R: AsyncRead> {
     Len {
         len: ReadExact<R, [u8; 4]>,
         buffer: SSHBuffer,
-        pair: Arc<CipherPair>,
+        pair: Arc<Mutex<CipherPair>>,
+        mac: Arc<MacPair>,
     },
     Body {
         body: ReadExact<R, CryptoVec>,
         buffer: SSHBuffer,
-        pair: Arc<CipherPair>,
+        pair: Arc<Mutex<CipherPair>>,
+        mac: Arc<MacPair>,
     },
 }
 
@@ -136,13 +140,14 @@ impl<R: AsyncRead> CipherRead<R> {
                         mut len,
                         buffer,
                         pair,
+                        mac,
                     }) = self.0.take()
         {
             // Aborting, and abandoning the 4 bytes of buffer.
             if let Some((r, _)) = len.try_abort() {
                 return Some((r, buffer));
             } else {
-                self.0 = Some(CipherReadState::Len { len, buffer, pair })
+                self.0 = Some(CipherReadState::Len { len, buffer, pair, mac })
             }
         }
         None
@@ -161,16 +166,23 @@ impl<R: AsyncRead> Future for CipherRead<R> {
                          mut len,
                          mut buffer,
                          pair,
+                         mac,
                      }) => {
                     if let Async::Ready((stream, len_)) = len.poll()? {
                         {
-                            let key = pair.remote_to_local.as_opening_key();
+                            let mut m_pair = pair.lock().unwrap();
+                            let key = m_pair.remote_to_local.as_opening_key();
                             let seqn = buffer.seqn.0;
                             buffer.buffer.clear();
                             buffer.buffer.extend(&len_);
                             let len = key.decrypt_packet_length(seqn, len_);
                             let len = BigEndian::read_u32(&len) as usize + key.tag_len();
-                            buffer.buffer.resize(len + 4);
+                            let mac_len = if let super::mac::HMacAlgo::HmacSha256(..) = mac.remote_to_local {
+                                32 //32 bytes of mac
+                            } else {
+                                0
+                            };
+                            buffer.buffer.resize(len + 4 + mac_len);
                         }
                         self.0 = Some(CipherReadState::Body {
                             body: read_exact_from(
@@ -180,9 +192,10 @@ impl<R: AsyncRead> Future for CipherRead<R> {
                             ),
                             buffer,
                             pair,
+                            mac,
                         })
                     } else {
-                        self.0 = Some(CipherReadState::Len { len, buffer, pair });
+                        self.0 = Some(CipherReadState::Len { len, buffer, pair, mac });
                         return Ok(Async::NotReady);
                     }
                 }
@@ -190,14 +203,22 @@ impl<R: AsyncRead> Future for CipherRead<R> {
                          mut body,
                          mut buffer,
                          pair,
+                         mac,
                      }) => {
                     if let Async::Ready((stream, body)) = body.poll()? {
                         let plaintext_end = {
                             buffer.buffer = body;
-                            let key = pair.remote_to_local.as_opening_key();
+                            let mut m_pair = pair.lock().unwrap();
+                            let key = m_pair.remote_to_local.as_opening_key();
                             let seqn = buffer.seqn.0;
-                            let ciphertext_len = buffer.buffer.len() - key.tag_len();
-                            let (ciphertext, tag) = buffer.buffer.split_at_mut(ciphertext_len);
+                            let mac_len = if let super::mac::HMacAlgo::HmacSha256(..) = mac.remote_to_local {
+                                32 //32 bytes of mac
+                            } else {
+                                0
+                            };
+                            let ciphertext_len = buffer.buffer.len() - key.tag_len() - mac_len;
+                            let (ciphertext, tag_mac) = buffer.buffer.split_at_mut(ciphertext_len);
+                            let (tag, _mac) = tag_mac.split_at_mut(key.tag_len()); // TODO: mac
                             let plaintext = key.open(seqn, ciphertext, tag)?;
 
                             let padding_length = plaintext[0] as usize;
@@ -214,7 +235,7 @@ impl<R: AsyncRead> Future for CipherRead<R> {
                         };
                         return Ok(Async::Ready((stream, buffer, plaintext_end + 4)));
                     } else {
-                        self.0 = Some(CipherReadState::Body { body, buffer, pair });
+                        self.0 = Some(CipherReadState::Body { body, buffer, pair, mac });
                         return Ok(Async::NotReady);
                     }
                 }
@@ -223,16 +244,19 @@ impl<R: AsyncRead> Future for CipherRead<R> {
     }
 }
 
-pub fn read<R: AsyncRead>(stream: R, buffer: SSHBuffer, pair: Arc<CipherPair>) -> CipherRead<R> {
+pub fn read<R: AsyncRead>(
+    stream: R, buffer: SSHBuffer, pair: Arc<Mutex<CipherPair>>, mac: Arc<MacPair>
+) -> CipherRead<R> {
     CipherRead(Some(CipherReadState::Len {
         len: read_exact_from(stream, [0; 4], 0),
         buffer,
         pair,
+        mac,
     }))
 }
 
 impl CipherPair {
-    pub fn write(&self, payload: &[u8], buffer: &mut SSHBuffer) {
+    pub fn write(&mut self, payload: &[u8], buffer: &mut SSHBuffer, mac: &super::mac::MacPair) {
         // https://tools.ietf.org/html/rfc4253#section-6
         //
         // The variables `payload`, `packet_length` and `padding_length` refer
@@ -249,6 +273,10 @@ impl CipherPair {
         assert!(packet_length <= std::u32::MAX as usize);
         buffer.buffer.push_u32_be(packet_length as u32);
 
+        debug!("CipherPair.write: Packet length: {}", packet_length as u32);
+        debug!("CipherPair.write: Payload length: {}", payload.len());
+        debug!("CipherPair.write: Padding length: {}", PADDING_LENGTH_LEN + padding_length);
+
         assert!(padding_length <= std::u8::MAX as usize);
         buffer.buffer.push(padding_length as u8);
         buffer.buffer.extend(payload);
@@ -258,7 +286,15 @@ impl CipherPair {
         let (plaintext, tag) =
             buffer.buffer[offset..].split_at_mut(PACKET_LENGTH_LEN + packet_length);
 
+        let mut tmp: Vec<u8> = Vec::new();
+        tmp.extend_from_slice(plaintext);
+
         key.seal(buffer.seqn.0, plaintext, tag);
+
+        let mut unenc_packet: CryptoVec = CryptoVec::new();
+        unenc_packet.push_u32_be(buffer.seqn.0);
+        unenc_packet.extend(&tmp);
+        mac.sign(&unenc_packet, buffer);
 
         // Sequence numbers are on 32 bits and wrap.
         // https://tools.ietf.org/html/rfc4253#section-6.4

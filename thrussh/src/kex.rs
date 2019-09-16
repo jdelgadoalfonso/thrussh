@@ -21,6 +21,7 @@ use cryptovec::CryptoVec;
 use session::Exchange;
 use key;
 use cipher;
+use mac;
 use thrussh_keys::encoding::Encoding;
 use openssl;
 use sodium;
@@ -166,13 +167,22 @@ impl Algorithm {
         buffer: &mut CryptoVec,
         key: &mut CryptoVec,
         cipher: cipher::Name,
+        mac: mac::Name,
         is_server: bool,
-    ) -> Result<super::cipher::CipherPair, Error> {
+    ) -> Result<(super::cipher::CipherPair, super::mac::MacPair), Error> {
         let cipher = match cipher {
             super::cipher::chacha20poly1305::NAME => &super::cipher::chacha20poly1305::CIPHER,
             super::cipher::aes128ctr::NAME => &super::cipher::aes128ctr::CIPHER,
             _ => unreachable!(),
         };
+        let mac = match mac {
+            super::mac::HMAC_SHA2_256::NAME => &super::mac::HMAC_BUILDER,
+            _ => unreachable!(),
+        };
+        let mut iv = CryptoVec::new();
+        let mut mac_key = CryptoVec::new();
+        let mut mac_key_l_to_r: [u8; 32] = [0; 32];
+        let mut mac_key_r_to_l: [u8; 32] = [0; 32];
 
         // https://tools.ietf.org/html/rfc4253#section-7.2
         let mut compute_key = |c, key: &mut CryptoVec, len| -> Result<(), Error> {
@@ -212,21 +222,37 @@ impl Algorithm {
             Ok(())
         };
 
-        let (local_to_remote, remote_to_local) = if is_server {
-            (b'D', b'C')
+        let (l_to_r_iv, l_to_r_key, l_to_r_mac, r_to_l_iv, r_to_l_key, r_to_l_mac) =
+        if is_server {
+            (b'B', b'D', b'F', b'A', b'C', b'E')
         } else {
-            (b'C', b'D')
+            (b'A', b'C', b'E', b'B', b'D', b'F')
         };
 
-        compute_key(local_to_remote, key, cipher.key_len)?;
-        let local_to_remote = (cipher.make_sealing_cipher)(key);
+        if let Some(iv_len) = cipher.iv_len {
+            compute_key(l_to_r_iv, &mut iv, iv_len)?;
+        }
+        compute_key(l_to_r_key, key, cipher.key_len)?;
+        let local_to_remote = (cipher.make_sealing_cipher)(key, cipher.iv_len.map(|_| iv.as_ref()));
+        compute_key(l_to_r_mac, &mut mac_key, mac.key_len)?;
+        mac_key_l_to_r.clone_from_slice(mac_key.as_ref());
+        let local_to_remote_mac = (mac.make_integrity_key_sign)(&mac_key);
 
-        compute_key(remote_to_local, key, cipher.key_len)?;
-        let remote_to_local = (cipher.make_opening_cipher)(key);
+        if let Some(iv_len) = cipher.iv_len {
+            compute_key(r_to_l_iv, &mut iv, iv_len)?;
+        }
+        compute_key(r_to_l_key, key, cipher.key_len)?;
+        let remote_to_local = (cipher.make_opening_cipher)(key, cipher.iv_len.map(|_| iv.as_ref()));
+        compute_key(r_to_l_mac, &mut mac_key, mac.key_len)?;
+        mac_key_r_to_l.clone_from_slice(mac_key.as_ref());
+        let remote_to_local_mac = (mac.make_integrity_key_verify)(&mac_key);
 
-        Ok(super::cipher::CipherPair {
-            local_to_remote: local_to_remote,
-            remote_to_local: remote_to_local,
-        })
+        Ok((super::cipher::CipherPair {
+            local_to_remote,
+            remote_to_local,
+        }, super::mac::MacPair {
+            local_to_remote: super::mac::HMacAlgo::HmacSha256(mac_key_l_to_r, local_to_remote_mac),
+            remote_to_local: super::mac::HMacAlgo::HmacSha256(mac_key_r_to_l, remote_to_local_mac),
+        }))
     }
 }

@@ -1,9 +1,10 @@
 use super::*;
 use cipher;
+use mac;
 use negotiation::Select;
 use msg;
 use negotiation;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tcp::Tcp;
 use ssh_read::SshRead;
 // use tokio_timer::{Timer, Sleep};
@@ -160,7 +161,9 @@ impl<R: AsyncRead + AsyncWrite + Tcp, H: Handler> AtomicPoll<HandlerError<H::Err
                             let mut buf = self.read_buffer.take().unwrap();
                             buf.buffer.clear();
                             self.state = Some(ConnectionState::Read(
-                                cipher::read(stream, buf, session.common.cipher.clone()),
+                                cipher::read(
+                                    stream, buf, session.common.cipher.clone(), session.common.mac.clone()
+                                ),
                             ));
                         }
                     }
@@ -187,7 +190,9 @@ impl<R: AsyncRead + AsyncWrite + Tcp, H: Handler> AtomicPoll<HandlerError<H::Err
                     } else if buf.buffer[5] <= 4 {
                         let session = self.session.as_ref().unwrap();
                         self.state = Some(ConnectionState::Read(
-                            cipher::read(stream, buf, session.common.cipher.clone()),
+                            cipher::read(
+                                stream, buf, session.common.cipher.clone(), session.common.mac.clone()
+                            ),
                         ));
                         return Ok(Async::Ready(Status::Ok));
                     } else {
@@ -268,7 +273,8 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
                 kex: None,
                 auth_user: String::new(),
                 auth_method: None, // Client only.
-                cipher: Arc::new(cipher::CLEAR_PAIR),
+                cipher: Arc::new(Mutex::new(cipher::CLEAR_PAIR)),
+                mac: Arc::new(mac::CLEAR_PAIR),
                 encrypted: None,
                 config: config,
                 wants_reply: false,
@@ -312,8 +318,9 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
                 session_id: None,
             };
             kexinit.server_write(
-                session.common.config.as_ref(),
-                session.common.cipher.as_ref(),
+                &session.common.config,
+                &mut session.common.cipher.lock().unwrap(),
+                &session.common.mac,
                 &mut session.common.write_buffer,
             )?;
             session.common.kex = Some(Kex::KexInit(kexinit));
@@ -434,7 +441,8 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
                 {
                     let next_kex = kexinit.server_parse(
                         session.common.config.as_ref(),
-                        &session.common.cipher,
+                        &mut session.common.cipher.lock().unwrap(),
+                        &session.common.mac,
                         &buf,
                         &mut session.common.write_buffer,
                     );
@@ -467,7 +475,8 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
                     session.common.config.as_ref(),
                     &mut self.buffer,
                     &mut self.buffer2,
-                    &session.common.cipher,
+                    &mut session.common.cipher.lock().unwrap(),
+                    &session.common.mac,
                     &buf,
                     &mut session.common.write_buffer,
                 );
@@ -539,7 +548,8 @@ impl<H: Handler, R: AsyncRead + AsyncWrite + Tcp> Connection<R, H> {
                     );
                     session.common.kex = Some(kexinit.server_parse(
                         session.common.config.as_ref(),
-                        &mut session.common.cipher,
+                        &mut session.common.cipher.lock().unwrap(),
+                        &session.common.mac,
                         buf,
                         &mut session.common.write_buffer,
                     )?);

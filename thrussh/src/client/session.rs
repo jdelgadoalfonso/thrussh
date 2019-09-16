@@ -13,7 +13,8 @@ impl Session {
         if let Some(ref mut enc) = self.0.encrypted {
             if enc.flush(
                 &self.0.config.as_ref().limits,
-                &mut self.0.cipher,
+                &mut self.0.cipher.lock().unwrap(),
+                &self.0.mac,
                 &mut self.0.write_buffer,
             )
             {
@@ -21,7 +22,8 @@ impl Session {
                     let mut kexinit = KexInit::initiate_rekey(exchange, &enc.session_id);
                     kexinit.client_write(
                         &self.0.config.as_ref(),
-                        &mut self.0.cipher,
+                        &mut self.0.cipher.lock().unwrap(),
+                        &self.0.mac,
                         &mut self.0.write_buffer,
                     )?;
                     enc.rekey = Some(Kex::KexInit(kexinit))

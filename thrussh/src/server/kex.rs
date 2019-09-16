@@ -2,6 +2,7 @@ use super::*;
 use negotiation::Select;
 use msg;
 use cipher::CipherPair;
+use mac::MacPair;
 use negotiation;
 use key::PubKey;
 use thrussh_keys::encoding::{Encoding, Reader};
@@ -12,7 +13,8 @@ impl KexInit {
     pub fn server_parse(
         mut self,
         config: &Config,
-        cipher: &CipherPair,
+        cipher: &mut CipherPair,
+        mac: &MacPair,
         buf: &[u8],
         write_buffer: &mut SSHBuffer,
     ) -> Result<Kex, Error> {
@@ -27,7 +29,7 @@ impl KexInit {
                 return Err(Error::Kex);
             };
             if !self.sent {
-                self.server_write(config, cipher, write_buffer)?
+                self.server_write(config, cipher, mac, write_buffer)?
             }
             let mut key = 0;
             debug!("config {:?} algo {:?}", config.keys, algo.key);
@@ -54,13 +56,14 @@ impl KexInit {
     pub fn server_write(
         &mut self,
         config: &Config,
-        cipher: &CipherPair,
+        cipher: &mut CipherPair,
+        mac: &MacPair,
         write_buffer: &mut SSHBuffer,
     ) -> Result<(), Error> {
         self.exchange.server_kex_init.clear();
         negotiation::write_kex(&config.preferred, &mut self.exchange.server_kex_init)?;
         self.sent = true;
-        cipher.write(&self.exchange.server_kex_init, write_buffer);
+        cipher.write(&self.exchange.server_kex_init, write_buffer, mac);
         Ok(())
     }
 }
@@ -71,7 +74,8 @@ impl KexDh {
         config: &Config,
         buffer: &mut CryptoVec,
         buffer2: &mut CryptoVec,
-        cipher: &CipherPair,
+        cipher: &mut CipherPair,
+        mac: &MacPair,
         buf: &[u8],
         write_buffer: &mut SSHBuffer,
     ) -> Result<Kex, Error> {
@@ -117,9 +121,9 @@ impl KexDh {
             debug!("hash: {:?}", hash);
             debug!("key: {:?}", config.keys[kexdhdone.key]);
             config.keys[kexdhdone.key].add_signature(buffer, &hash)?;
-            cipher.write(&buffer, write_buffer);
+            cipher.write(&buffer, write_buffer, mac);
 
-            cipher.write(&[msg::NEWKEYS], write_buffer);
+            cipher.write(&[msg::NEWKEYS], write_buffer, mac);
 
             Ok(Kex::NewKeys(
                 kexdhdone.compute_keys(hash, buffer, buffer2, true)?,

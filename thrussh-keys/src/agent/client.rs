@@ -319,6 +319,7 @@ impl<S: AsyncRead+AsyncWrite> AgentClient<S> {
         match *public {
             PublicKey::RSA { hash, .. } =>
                 self.buf.push_u32_be(match hash {
+                    SignatureHash::SHA1 => 1,
                     SignatureHash::SHA2_256 => 2,
                     SignatureHash::SHA2_512 => 4,
                 }),

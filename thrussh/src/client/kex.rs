@@ -1,6 +1,7 @@
 use super::*;
 use negotiation::Select;
 use cipher::CipherPair;
+use mac::MacPair;
 use negotiation;
 
 use kex;
@@ -9,7 +10,8 @@ impl KexInit {
     pub fn client_parse(
         mut self,
         config: &Config,
-        cipher: &CipherPair,
+        cipher: &mut CipherPair,
+        mac: &MacPair,
         buf: &[u8],
         write_buffer: &mut SSHBuffer,
     ) -> Result<KexDhDone, Error> {
@@ -22,7 +24,7 @@ impl KexInit {
             return Err(Error::Kex);
         };
         if !self.sent {
-            self.client_write(config, cipher, write_buffer)?
+            self.client_write(config, cipher, mac, write_buffer)?
         }
 
         // This function is called from the public API.
@@ -38,7 +40,7 @@ impl KexInit {
             &mut self.exchange.client_kex_init,
         )?;
 
-        cipher.write(&self.exchange.client_kex_init[i0..], write_buffer);
+        cipher.write(&self.exchange.client_kex_init[i0..], write_buffer, mac);
         self.exchange.client_kex_init.resize(i0);
 
         debug!("moving to kexdhdone");
@@ -54,7 +56,8 @@ impl KexInit {
     pub fn client_write(
         &mut self,
         config: &Config,
-        cipher: &CipherPair,
+        cipher: &mut CipherPair,
+        mac: &MacPair,
         write_buffer: &mut SSHBuffer,
     ) -> Result<(), Error> {
         self.exchange.client_kex_init.clear();
@@ -63,7 +66,7 @@ impl KexInit {
             &mut self.exchange.client_kex_init,
         )?;
         self.sent = true;
-        cipher.write(&self.exchange.client_kex_init, write_buffer);
+        cipher.write(&self.exchange.client_kex_init, write_buffer, mac);
         Ok(())
     }
 }

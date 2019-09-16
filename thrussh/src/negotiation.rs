@@ -53,7 +53,7 @@ pub const DEFAULT: Preferred = Preferred {
     kex: &[kex::CURVE25519],
     key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA],
     cipher: &[cipher::chacha20poly1305::NAME, cipher::aes128ctr::NAME],
-    mac: &[mac::HMAC_SHA2_256],
+    mac: &[mac::HMAC_SHA2_256::NAME],
     compression: &["none"],
 };
 

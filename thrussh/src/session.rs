@@ -29,7 +29,7 @@ use byteorder::{BigEndian, ByteOrder};
 use openssl::hash;
 use thrussh_keys::encoding::Encoding;
 use std::num::Wrapping;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 pub(crate) struct Encrypted {
@@ -39,7 +39,6 @@ pub(crate) struct Encrypted {
     pub exchange: Option<Exchange>,
     pub kex: kex::Algorithm,
     pub key: usize,
-    pub mac: mac::Name,
     pub session_id: hash::DigestBytes,
     pub rekey: Option<Kex>,
     pub channels: HashMap<ChannelId, Channel>,
@@ -57,7 +56,8 @@ pub(crate) struct CommonSession<Config> {
     pub auth_method: Option<auth::Method>,
     pub write_buffer: SSHBuffer,
     pub kex: Option<Kex>,
-    pub cipher: Arc<cipher::CipherPair>,
+    pub cipher: Arc<Mutex<cipher::CipherPair>>,
+    pub mac: Arc<mac::MacPair>,
     pub wants_reply: bool,
     pub disconnected: bool,
     pub buffer: Option<CryptoVec>,
@@ -69,14 +69,13 @@ impl<C> CommonSession<C> {
             enc.exchange = Some(newkeys.exchange);
             enc.kex = newkeys.kex;
             enc.key = newkeys.key;
-            enc.mac = newkeys.names.mac;
-            self.cipher = Arc::new(newkeys.cipher);
+            self.mac = Arc::new(newkeys.mac);
+            self.cipher = Arc::new(Mutex::new(newkeys.cipher));
         } else {
             self.encrypted = Some(Encrypted {
                 exchange: Some(newkeys.exchange),
                 kex: newkeys.kex,
                 key: newkeys.key,
-                mac: newkeys.names.mac,
                 session_id: newkeys.session_id,
                 state: Some(state),
                 rekey: None,
@@ -87,7 +86,8 @@ impl<C> CommonSession<C> {
                 write_cursor: 0,
                 last_rekey: std::time::Instant::now(),
             });
-            self.cipher = Arc::new(newkeys.cipher);
+            self.mac = Arc::new(newkeys.mac);
+            self.cipher = Arc::new(Mutex::new(newkeys.cipher));
         }
     }
 
@@ -197,7 +197,8 @@ impl Encrypted {
     pub fn flush(
         &mut self,
         limits: &Limits,
-        cipher: &cipher::CipherPair,
+        cipher: &mut cipher::CipherPair,
+        mac: &mac::MacPair,
         write_buffer: &mut SSHBuffer,
     ) -> bool {
         // If there are pending packets (and we've not started to rekey), flush them.
@@ -226,7 +227,7 @@ impl Encrypted {
                     debug!("flushing len {:?}", len);
                     let packet = &self.write[(self.write_cursor + 4)..
                                              (self.write_cursor + 4 + len)];
-                    cipher.write(packet, write_buffer);
+                    cipher.write(packet, write_buffer, mac);
                     self.write_cursor += 4 + len
                 }
             }
@@ -396,12 +397,13 @@ impl KexDhDone {
             hash.clone()
         };
         // Now computing keys.
-        let c = self.kex.compute_keys(
+        let (c, m) = self.kex.compute_keys(
             &session_id,
             &hash,
             buffer,
             buffer2,
             self.names.cipher,
+            self.names.mac,
             is_server,
         )?;
         Ok(NewKeys {
@@ -410,6 +412,7 @@ impl KexDhDone {
             kex: self.kex,
             key: self.key,
             cipher: c,
+            mac: m,
             session_id: session_id,
             received: false,
             sent: false,
@@ -424,6 +427,7 @@ pub struct NewKeys {
     pub kex: kex::Algorithm,
     pub key: usize,
     pub cipher: cipher::CipherPair,
+    pub mac: mac::MacPair,
     pub session_id: hash::DigestBytes,
     pub received: bool,
     pub sent: bool,

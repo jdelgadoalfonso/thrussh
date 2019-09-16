@@ -28,13 +28,14 @@ const TAG_LEN: usize = 16;
 pub static CIPHER: super::Cipher = super::Cipher {
     name: NAME,
     key_len: 64,
+    iv_len: None,
     make_sealing_cipher,
     make_opening_cipher,
 };
 
 pub const NAME: super::Name = super::Name("chacha20-poly1305@openssh.com");
 
-fn make_sealing_cipher(k: &[u8]) -> super::SealingCipher {
+fn make_sealing_cipher(k: &[u8], _: Option<&[u8]>) -> super::SealingCipher {
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
@@ -42,7 +43,7 @@ fn make_sealing_cipher(k: &[u8]) -> super::SealingCipher {
     super::SealingCipher::Chacha20Poly1305(SealingKey { k1, k2, sodium: Sodium::new() })
 }
 
-fn make_opening_cipher(k: &[u8]) -> super::OpeningCipher {
+fn make_opening_cipher(k: &[u8], _: Option<&[u8]>) -> super::OpeningCipher {
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
@@ -60,7 +61,7 @@ fn make_counter(sequence_number: u32) -> Nonce {
 impl super::OpeningKey for OpeningKey {
 
     fn decrypt_packet_length(
-        &self,
+        &mut self,
         sequence_number: u32,
         mut encrypted_packet_length: [u8; 4],
     ) -> [u8; 4] {
@@ -74,7 +75,7 @@ impl super::OpeningKey for OpeningKey {
     }
 
     fn open<'a>(
-        &self,
+        &mut self,
         sequence_number: u32,
         ciphertext_in_plaintext_out: &'a mut [u8],
         tag: &[u8],
@@ -129,7 +130,7 @@ impl super::SealingKey for SealingKey {
 
     /// Append an encrypted packet with contents `packet_content` at the end of `buffer`.
     fn seal(
-        &self,
+        &mut self,
         sequence_number: u32,
         plaintext_in_ciphertext_out: &mut [u8],
         tag_out: &mut [u8],

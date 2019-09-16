@@ -11,10 +11,10 @@ use auth;
 impl<R: AsyncRead + AsyncWrite + Tcp, H: Handler> Connection<R, H> {
 
     /// Try to authenticate this client using a password.
-    pub fn authenticate_password(mut self, user: &str, password: String) -> Authenticate<R, H> {
+    pub fn authenticate_password(mut self, user: String, password: String) -> Authenticate<R, H> {
         let is_waiting = if let Some(ref mut s) = self.session {
             let meth = auth::Method::Password { password };
-            s.write_auth_request_if_needed(user, meth)
+            s.write_auth_request_if_needed(&user, meth)
         } else { false };
         if is_waiting {
             self.abort_read().unwrap_or(());

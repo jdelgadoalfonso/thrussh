@@ -56,7 +56,8 @@ impl super::session::Session {
                     );
                     self.0.kex = Some(Kex::KexDhDone(kexinit.client_parse(
                         self.0.config.as_ref(),
-                        &mut self.0.cipher,
+                        &mut self.0.cipher.lock().unwrap(),
+                        &self.0.mac,
                         buf,
                         &mut self.0.write_buffer,
                     )?));

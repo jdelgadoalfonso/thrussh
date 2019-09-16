@@ -69,6 +69,7 @@ pub trait Verify {
 #[derive(Eq, PartialEq, Clone, Copy, Debug, Hash, Serialize, Deserialize)]
 #[allow(non_camel_case_types)]
 pub enum SignatureHash {
+    SHA1,
     /// SHA2, 256 bits.
     SHA2_256,
     /// SHA2, 512 bits.
@@ -78,6 +79,7 @@ pub enum SignatureHash {
 impl SignatureHash {
     pub fn name(&self) -> Name {
         match *self {
+            SignatureHash::SHA1 => SSH_RSA,
             SignatureHash::SHA2_256 => RSA_SHA2_256,
             SignatureHash::SHA2_512 => RSA_SHA2_512,
         }
@@ -86,6 +88,7 @@ impl SignatureHash {
     fn to_message_digest(&self) -> openssl::hash::MessageDigest {
         use openssl::hash::MessageDigest;
         match *self {
+            SignatureHash::SHA1 => MessageDigest::sha1(),
             SignatureHash::SHA2_256 => MessageDigest::sha256(),
             SignatureHash::SHA2_512 => MessageDigest::sha512(),
         }
@@ -138,10 +141,10 @@ impl PublicKey {
                 p.key.clone_from_slice(key_bytes);
                 Ok(PublicKey::Ed25519(p))
             }
-            b"rsa-sha2-256" | b"rsa-sha2-512" => {
+            b"rsa-sha2-256" | b"rsa-sha2-512" | b"ssh-rsa" => {
                 let mut p = pubkey.reader(0);
                 let key_algo = p.read_string()?;
-                if key_algo != b"rsa-sha2-256" && key_algo != b"rsa-sha2-512" {
+                if key_algo != b"rsa-sha2-256" && key_algo != b"rsa-sha2-512" && key_algo != b"ssh-rsa" {
                     return Err(Error::CouldNotReadKey);
                 }
                 let key_e = p.read_string()?;
@@ -155,7 +158,7 @@ impl PublicKey {
                         BigNum::from_slice(key_e)?,
                     )?)?),
                     hash: {
-                        if algo == b"rsa-sha2-256" {
+                        if algo == b"rsa-sha2-256" || algo == b"ssh-rsa" {
                             SignatureHash::SHA2_256
                         } else {
                             SignatureHash::SHA2_512
@@ -415,11 +418,13 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
         use openssl::rsa::*;
         use openssl::bn::*;
         return Ok(PublicKey::RSA {
-            key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
-                BigNum::from_slice(n)?,
-                BigNum::from_slice(e)?,
-            )?)?),
-            hash: SignatureHash::SHA2_256,
+            key: OpenSSLPKey(PKey::from_rsa(
+                Rsa::from_public_components(
+                    BigNum::from_slice(n)?,
+                    BigNum::from_slice(e)?,
+                )?
+            )?),
+            hash: SignatureHash::SHA1,
         });
     }
     Err(Error::CouldNotReadKey)

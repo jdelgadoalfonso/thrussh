@@ -13,59 +13,70 @@
 // limitations under the License.
 //
 
-// http://cvsweb.openbsd.org/cgi-bin/cvsweb/src/usr.bin/ssh/PROTOCOL.chacha20poly1305?annotate=HEAD
-
 use super::super::Error;
 use sodium::Sodium;
-use sodium::aes_128_ctr::{KEY_BYTES, NONCE_BYTES, Nonce, Key};
-use byteorder::{ByteOrder, BigEndian};
+use sodium::aes_128_ctr::{
+    Aes128Ctr, NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek, GenericArray,
+    KEY_BYTES, NONCE_BYTES, Nonce, Key
+};
 
-pub struct OpeningKey { k1: Key, k2: Key, sodium: Sodium }
-pub struct SealingKey { k1: Key, k2: Key, sodium: Sodium }
+pub struct OpeningKey { iv: Nonce, key: Key, aes128_ctr: Aes128Ctr, sodium: Sodium }
+pub struct SealingKey { iv: Nonce, key: Key, aes128_ctr: Aes128Ctr, sodium: Sodium }
 
 const TAG_LEN: usize = 0;
+const BLOCK_SIZE: usize = 16;
 
 pub static CIPHER: super::Cipher = super::Cipher {
     name: NAME,
     key_len: 32,
+    iv_len: Some(16),
     make_sealing_cipher,
     make_opening_cipher,
 };
 
 pub const NAME: super::Name = super::Name("aes128-ctr");
 
-fn make_sealing_cipher(k: &[u8]) -> super::SealingCipher {
-    let mut k1 = Key([0; KEY_BYTES]);
-    let mut k2 = Key([0; KEY_BYTES]);
-    k1.0.clone_from_slice(&k[KEY_BYTES..]);
-    k2.0.clone_from_slice(&k[..KEY_BYTES]);
-    super::SealingCipher::Aes128Ctr(SealingKey { k1, k2, sodium: Sodium::new() })
+fn make_sealing_cipher(k: &[u8], i: Option<&[u8]>) -> super::SealingCipher {
+    let mut iv = Nonce([0; NONCE_BYTES]);
+    let mut key = Key([0; KEY_BYTES]);
+    iv.0.clone_from_slice(&i.unwrap()[..NONCE_BYTES]);
+    key.0.clone_from_slice(&k[..KEY_BYTES]);
+    let g_key = GenericArray::from_slice(&key.0);
+    let g_nonce = GenericArray::from_slice(&iv.0);
+    // create cipher instance
+    let cipher = Aes128Ctr::new(&g_key, &g_nonce);
+    super::SealingCipher::Aes128Ctr(SealingKey {
+        iv, key, aes128_ctr: cipher, sodium: Sodium::new()
+    })
 }
 
-fn make_opening_cipher(k: &[u8]) -> super::OpeningCipher {
-    let mut k1 = Key([0; KEY_BYTES]);
-    let mut k2 = Key([0; KEY_BYTES]);
-    k1.0.clone_from_slice(&k[KEY_BYTES..]);
-    k2.0.clone_from_slice(&k[..KEY_BYTES]);
-    super::OpeningCipher::Aes128Ctr(OpeningKey { k1, k2, sodium: Sodium::new() })
-}
-
-fn make_counter(sequence_number: u32) -> Nonce {
-    let mut nonce = Nonce([0; NONCE_BYTES]);
-    let i0 = NONCE_BYTES-4;
-    BigEndian::write_u32(&mut nonce.0[i0..], sequence_number);
-    nonce
+fn make_opening_cipher(k: &[u8], i: Option<&[u8]>) -> super::OpeningCipher {
+    let mut iv = Nonce([0; NONCE_BYTES]);
+    let mut key = Key([0; KEY_BYTES]);
+    iv.0.clone_from_slice(&i.unwrap()[..NONCE_BYTES]);
+    key.0.clone_from_slice(&k[..KEY_BYTES]);
+    let g_key = GenericArray::from_slice(&key.0);
+    let g_nonce = GenericArray::from_slice(&iv.0);
+    // create cipher instance
+    let cipher = Aes128Ctr::new(&g_key, &g_nonce);
+    super::OpeningCipher::Aes128Ctr(OpeningKey {
+        iv, key, aes128_ctr: cipher, sodium: Sodium::new()
+    })
 }
 
 impl super::OpeningKey for OpeningKey {
 
     fn decrypt_packet_length(
-        &self,
-        sequence_number: u32,
+        &mut self,
+        _sequence_number: u32,
         mut encrypted_packet_length: [u8; 4],
     ) -> [u8; 4] {
-        let nonce = make_counter(sequence_number);
-        self.sodium.apply_aes128ctr(&mut encrypted_packet_length, &nonce, &self.k1);
+        //let pos: u64 = self.aes128_ctr.current_pos();
+        let mut p = self.aes128_ctr.clone();
+//        self.sodium.apply_aes128ctr(&mut encrypted_packet_length, &self.iv, &self.key);
+       // self.aes128_ctr.apply_keystream(&mut encrypted_packet_length);
+       // self.aes128_ctr.seek(pos);
+        p.apply_keystream(&mut encrypted_packet_length);
         encrypted_packet_length
     }
 
@@ -74,14 +85,13 @@ impl super::OpeningKey for OpeningKey {
     }
 
     fn open<'a>(
-        &self,
-        sequence_number: u32,
+        &mut self,
+        _sequence_number: u32,
         ciphertext_in_plaintext_out: &'a mut [u8],
         _tag: &[u8],
     ) -> Result<&'a [u8], Error> {
-
-        let nonce = make_counter(sequence_number);
-        self.sodium.apply_aes128ctr(&mut ciphertext_in_plaintext_out[4..], &nonce, &self.k2);
+        // self.sodium.apply_aes128ctr(&mut ciphertext_in_plaintext_out[..], &self.iv, &self.key);
+        self.aes128_ctr.apply_keystream(ciphertext_in_plaintext_out);
         Ok(&ciphertext_in_plaintext_out[4..])
     }
 }
@@ -89,15 +99,14 @@ impl super::OpeningKey for OpeningKey {
 impl super::SealingKey for SealingKey {
 
     fn padding_length(&self, payload: &[u8]) -> usize {
-        let block_size = 8;
         let extra_len = super::PACKET_LENGTH_LEN + super::PADDING_LENGTH_LEN;
         let padding_len = if payload.len() + extra_len <= super::MINIMUM_PACKET_LEN {
-            super::MINIMUM_PACKET_LEN - payload.len() - super::PADDING_LENGTH_LEN
+            super::MINIMUM_PACKET_LEN - payload.len() - extra_len
         } else {
-            (block_size - ((super::PADDING_LENGTH_LEN + payload.len()) % block_size))
+            (BLOCK_SIZE - ((extra_len + payload.len()) % BLOCK_SIZE))
         };
         if padding_len < super::PACKET_LENGTH_LEN {
-            padding_len + block_size
+            padding_len + BLOCK_SIZE
         } else {
             padding_len
         }
@@ -119,14 +128,13 @@ impl super::SealingKey for SealingKey {
 
     /// Append an encrypted packet with contents `packet_content` at the end of `buffer`.
     fn seal(
-        &self,
+        &mut self,
         sequence_number: u32,
         plaintext_in_ciphertext_out: &mut [u8],
         _tag_out: &mut [u8],
     ) {
-        let nonce = make_counter(sequence_number);
-        let (a, b) = plaintext_in_ciphertext_out.split_at_mut(4);
-        self.sodium.apply_aes128ctr(a, &nonce, &self.k1);
-        self.sodium.apply_aes128ctr(b, &nonce, &self.k2);
+        debug!("sequence_number: {}", sequence_number);
+        debug!("iv: {:?}", &self.iv.0);
+        self.aes128_ctr.apply_keystream(plaintext_in_ciphertext_out);
     }
 }
