@@ -13,8 +13,8 @@
 // limitations under the License.
 //
 
-use byteorder::{ByteOrder, BigEndian, WriteBytesExt};
-use Error;
+use crate::Error;
+use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use cryptovec::CryptoVec;
 
 #[doc(hidden)]
@@ -51,7 +51,6 @@ pub fn mpint_len(s: &[u8]) -> usize {
     (if s[i] & 0x80 != 0 { 5 } else { 4 }) + s.len() - i
 }
 
-
 impl Encoding for Vec<u8> {
     fn extend_ssh_string(&mut self, s: &[u8]) {
         self.write_u32::<BigEndian>(s.len() as u32).unwrap();
@@ -71,18 +70,14 @@ impl Encoding for Vec<u8> {
         }
         // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
         if s[i] & 0x80 != 0 {
-
-            self.write_u32::<BigEndian>((s.len() - i + 1) as u32).unwrap();
+            self.write_u32::<BigEndian>((s.len() - i + 1) as u32)
+                .unwrap();
             self.push(0)
-
         } else {
-
             self.write_u32::<BigEndian>((s.len() - i) as u32).unwrap();
-
         }
         self.extend(&s[i..]);
     }
-
 
     fn extend_list<A: Bytes, I: Iterator<Item = A>>(&mut self, list: I) {
         let len0 = self.len();
@@ -125,18 +120,13 @@ impl Encoding for CryptoVec {
         }
         // If the first non-zero is >= 128, write its length (u32, BE), followed by 0.
         if s[i] & 0x80 != 0 {
-
             self.push_u32_be((s.len() - i + 1) as u32);
             self.push(0)
-
         } else {
-
             self.push_u32_be((s.len() - i) as u32);
-
         }
         self.extend(&s[i..]);
     }
-
 
     fn extend_list<A: Bytes, I: Iterator<Item = A>>(&mut self, list: I) {
         let len0 = self.len();

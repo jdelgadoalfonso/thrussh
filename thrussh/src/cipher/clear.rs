@@ -13,7 +13,7 @@
 // limitations under the License.
 //
 
-use Error;
+use crate::Error;
 
 #[derive(Debug)]
 pub struct Key;
@@ -33,7 +33,6 @@ impl super::OpeningKey for Key {
         ciphertext_in_plaintext_out: &'a mut [u8],
         tag: &[u8],
     ) -> Result<&'a [u8], Error> {
-
         debug_assert_eq!(tag.len(), 0); // self.tag_len());
         Ok(&ciphertext_in_plaintext_out[4..])
     }

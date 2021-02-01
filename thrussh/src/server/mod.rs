@@ -15,30 +15,24 @@
 
 use std;
 use std::net::ToSocketAddrs;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use futures::stream::Stream;
-use futures::{Poll, Async};
 use futures::future::Future;
-use tokio::net::TcpListener;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::io::{flush, Flush, WriteAll};
 use thrussh_keys::key;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::pin;
 
-use super::*;
-use sshbuffer::*;
-use negotiation;
+use crate::session::*;
+use crate::ssh_read::*;
+use crate::sshbuffer::*;
+use crate::*;
 
-use session::*;
-use auth;
-
-mod encrypted;
-mod connection;
 mod kex;
 mod session;
-pub use self::connection::*;
 pub use self::kex::*;
 pub use self::session::*;
+mod encrypted;
 
 #[derive(Debug)]
 /// Configuration of a server.
@@ -80,8 +74,8 @@ impl Default for Config {
             auth_banner: None,
             auth_rejection_time: std::time::Duration::from_secs(1),
             keys: Vec::new(),
-            window_size: 200000,
-            maximum_packet_size: 200000,
+            window_size: 2097152,
+            maximum_packet_size: 32768,
             limits: Limits::default(),
             preferred: Default::default(),
             max_auth_attempts: 10,
@@ -137,18 +131,16 @@ pub enum Auth {
 
 /// Server handler. Each client will have their own handler.
 pub trait Handler: Sized {
-    /// The type of errors returned by the futures.
-    type Error: std::error::Error + Send + Sync;
-
+    type Error: From<crate::Error> + Send;
     /// The type of authentications, which can be a future ultimately
     /// resolving to
-    type FutureAuth: Future<Item = (Self, Auth), Error = Self::Error> + Send;
+    type FutureAuth: Future<Output = Result<(Self, Auth), Self::Error>> + Send;
 
     /// The type of units returned by some parts of this handler.
-    type FutureUnit: Future<Item = (Self, Session), Error = Self::Error> + Send;
+    type FutureUnit: Future<Output = Result<(Self, Session), Self::Error>> + Send;
 
     /// The type of future bools returned by some parts of this handler.
-    type FutureBool: Future<Item = (Self, Session, bool), Error = Self::Error> + Send;
+    type FutureBool: Future<Output = Result<(Self, Session, bool), Self::Error>> + Send;
 
     /// Convert an `Auth` to `Self::FutureAuth`. This is used to
     /// produce the default handlers.
@@ -156,7 +148,7 @@ pub trait Handler: Sized {
 
     /// Convert a `bool` to `Self::FutureBool`. This is used to
     /// produce the default handlers.
-    fn finished_bool(self, session: Session, b: bool) -> Self::FutureBool;
+    fn finished_bool(self, b: bool, session: Session) -> Self::FutureBool;
 
     /// Produce a `Self::FutureUnit`. This is used to produce the
     /// default handlers.
@@ -278,9 +270,19 @@ pub trait Handler: Sized {
         self,
         channel: ChannelId,
         new_window_size: usize,
-        session: Session,
+        mut session: Session,
     ) -> Self::FutureUnit {
+        if let Some(ref mut enc) = session.common.encrypted {
+            enc.flush_pending(channel);
+        }
         self.finished(session)
+    }
+
+    /// Called when this server adjusts the network window. Return the
+    /// next target window.
+    #[allow(unused_variables)]
+    fn adjust_window(&mut self, channel: ChannelId, current: u32) -> u32 {
+        current
     }
 
     /// The client requests a pseudo-terminal with the given
@@ -378,39 +380,328 @@ pub trait Handler: Sized {
     /// [RFC4254](https://tools.ietf.org/html/rfc4254#section-7).
     #[allow(unused_variables)]
     fn tcpip_forward(self, address: &str, port: u32, session: Session) -> Self::FutureBool {
-        self.finished_bool(session, false)
+        self.finished_bool(false, session)
     }
     /// Used to stop the reverse-forwarding of a port, see
     /// [RFC4254](https://tools.ietf.org/html/rfc4254#section-7).
     #[allow(unused_variables)]
     fn cancel_tcpip_forward(self, address: &str, port: u32, session: Session) -> Self::FutureBool {
-        self.finished_bool(session, false)
+        self.finished_bool(false, session)
     }
 }
 
 /// Trait used to create new handlers when clients connect.
 pub trait Server {
     /// The type of handlers.
-    type Handler: Handler+Send;
+    type Handler: Handler + Send;
     /// Called when a new client connects.
-    fn new(&mut self) -> Self::Handler;
+    fn new(&mut self, peer_addr: Option<std::net::SocketAddr>) -> Self::Handler;
 }
 
-/// Run a server. This function returns a future, which needs to be
-/// run by a Tokio event loop:
-///
-/// ```
-/// tokio::run(run(config, "0.0.0.0:2222", my_server));
-/// ```
-pub fn run<H: Server + Send + 'static>(config: Arc<Config>, addr: &str, mut server: H) -> impl Future<Item = (), Error = std::io::Error> {
-
+/// Run a server.
+/// Create a new `Connection` from the server's configuration, a
+/// stream and a [`Handler`](trait.Handler.html).
+pub async fn run<H: Server + Send + 'static>(
+    config: Arc<Config>,
+    addr: &str,
+    mut server: H,
+) -> Result<(), std::io::Error> {
     let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-    let socket = TcpListener::bind(&addr).unwrap();
+    let socket = TcpListener::bind(&addr).await?;
+    if config.maximum_packet_size > 65535 {
+        error!(
+            "Maximum packet size ({:?}) should not larger than a TCP packet (65535)",
+            config.maximum_packet_size
+        );
+    }
+    while let Ok((socket, _)) = socket.accept().await {
+        let config = config.clone();
+        let server = server.new(socket.peer_addr().ok());
+        tokio::spawn(run_stream(config, socket, server));
+    }
+    Ok(())
+}
 
-    socket.incoming().for_each(move |socket| {
-        let handler = server.new();
-        let connection = Connection::new(config.clone(), socket, handler).unwrap();
-        tokio::spawn(Box::new(connection.map_err(|err|  println!("err {:?}", err))));
-        Ok(())
+use std::cell::RefCell;
+thread_local! {
+    static B1: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
+    static B2: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
+}
+
+pub async fn timeout(delay: Option<std::time::Duration>) {
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await
+    } else {
+        futures::future::pending().await
+    };
+}
+
+async fn start_reading<R: AsyncRead + Unpin>(
+    mut stream_read: R,
+    mut buffer: SSHBuffer,
+    cipher: Arc<Mutex<crate::cipher::CipherPair>>,
+    mac: Arc<Mutex<crate::mac::MacPair>>,
+) -> Result<(usize, R, SSHBuffer), Error> {
+    buffer.buffer.clear();
+    let n = cipher::read(&mut stream_read, &mut buffer, cipher, mac).await?;
+    Ok((n, stream_read, buffer))
+}
+
+pub async fn run_stream<H: Handler, R>(
+    config: Arc<Config>,
+    mut stream: R,
+    handler: H,
+) -> Result<H, H::Error>
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut handler = Some(handler);
+    let delay = config.connection_timeout;
+    // Writing SSH id.
+    let mut decomp = CryptoVec::new();
+    let mut write_buffer = SSHBuffer::new();
+    write_buffer.send_ssh_id(config.as_ref().server_id.as_bytes());
+    stream
+        .write_all(&write_buffer.buffer[..])
+        .await
+        .map_err(crate::Error::from)?;
+
+    // Reading SSH id and allocating a session.
+    let mut stream = SshRead::new(&mut stream);
+    let common = read_ssh_id(config, &mut stream).await?;
+    let (sender, receiver) = tokio::sync::mpsc::channel(10);
+    let mut session = Session {
+        target_window_size: common.config.window_size,
+        common,
+        receiver,
+        sender: server::session::Handle { sender },
+    };
+    session.flush()?;
+    stream
+        .write_all(&session.common.write_buffer.buffer)
+        .await
+        .map_err(crate::Error::from)?;
+    session.common.write_buffer.buffer.clear();
+
+    let (stream_read, mut stream_write) = stream.split();
+    let buffer = SSHBuffer::new();
+    let cipher = session.common.cipher.clone();
+    let mac = session.common.mac.clone();
+    let reading = start_reading(stream_read, buffer, cipher.clone(), mac.clone());
+    pin!(reading);
+    let mut is_reading = None;
+
+    while !session.common.disconnected {
+        let cipher = cipher.clone();
+        let mac = mac.clone();
+        tokio::select! {
+            r = &mut reading => {
+                let (stream_read, buffer) = match r {
+                    Ok((_, stream_read, buffer)) => (stream_read, buffer),
+                    Err(e) => return Err(e.into())
+                };
+                if buffer.buffer.len() < 5 {
+                    is_reading = Some((stream_read, buffer));
+                    break
+                }
+                let buf = if let Some(ref mut enc) = session.common.encrypted {
+                    let d = enc.decompress.decompress(
+                        &buffer.buffer[5..],
+                        &mut decomp,
+                    );
+                    if let Ok(buf) = d {
+                        buf
+                    } else {
+                        debug!("err = {:?}", d);
+                        is_reading = Some((stream_read, buffer));
+                        break
+                    }
+                } else {
+                    &buffer.buffer[5..]
+                };
+                if !buf.is_empty() {
+                    if buf[0] == crate::msg::DISCONNECT {
+                        debug!("break");
+                        is_reading = Some((stream_read, buffer));
+                        break;
+                    } else if buf[0] > 4 {
+                        match reply(session, &mut handler, &buf[..]).await {
+                            Ok(s) => session = s,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
+                reading.set(start_reading(stream_read, buffer, cipher, mac));
+            }
+            _ = timeout(delay) => {
+                debug!("timeout");
+                break
+            },
+            msg = session.receiver.recv(), if !session.is_rekeying() => {
+                match msg {
+                    Some((id, ChannelMsg::Data { data })) => {
+                        session.data(id, data);
+                    }
+                    Some((id, ChannelMsg::ExtendedData { ext, data })) => {
+                        session.extended_data(id, ext, data);
+                    }
+                    Some((id, ChannelMsg::Eof)) => {
+                        session.eof(id);
+                    }
+                    Some((id, ChannelMsg::Close)) => {
+                        session.close(id);
+                    }
+                    Some((id, ChannelMsg::XonXoff { client_can_do })) => {
+                        session.xon_xoff_request(id, client_can_do);
+                    }
+                    Some((id, ChannelMsg::ExitStatus { exit_status })) => {
+                        session.exit_status_request(id, exit_status);
+                    }
+                    Some((id, ChannelMsg::ExitSignal { signal_name, core_dumped, error_message, lang_tag })) => {
+                        session.exit_signal_request(id, signal_name, core_dumped, &error_message, &lang_tag);
+                    }
+                    Some((id, ChannelMsg::WindowAdjusted { new_size })) => {
+                        debug!("window adjusted to {:?} for channel {:?}", new_size, id);
+                    }
+                    Some((id, ChannelMsg::Success)) => {
+                        debug!("channel success {:?}", id);
+                    }
+                    None => {
+                        debug!("session.receiver: received None");
+                    }
+                }
+            }
+        }
+        session.flush()?;
+        stream_write
+            .write_all(&session.common.write_buffer.buffer)
+            .await
+            .map_err(crate::Error::from)?;
+        session.common.write_buffer.buffer.clear();
+    }
+    debug!("disconnected");
+    // Shutdown
+    stream_write.shutdown().await.map_err(crate::Error::from)?;
+    loop {
+        if let Some((stream_read, buffer)) = is_reading.take() {
+            reading.set(start_reading(
+                stream_read,
+                buffer,
+                session.common.cipher.clone(),
+                session.common.mac.clone(),
+            ));
+        }
+        let (n, r, b) = (&mut reading).await?;
+        is_reading = Some((r, b));
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(handler.unwrap())
+}
+
+async fn read_ssh_id<R: AsyncRead + Unpin>(
+    config: Arc<Config>,
+    read: &mut SshRead<R>,
+) -> Result<CommonSession<Arc<Config>>, Error> {
+    let sshid = if let Some(t) = config.connection_timeout {
+        tokio::time::timeout(t, read.read_ssh_id()).await??
+    } else {
+        read.read_ssh_id().await?
+    };
+    let mut exchange = Exchange::new();
+    exchange.client_id.extend(sshid);
+    // Preparing the response
+    exchange
+        .server_id
+        .extend(config.as_ref().server_id.as_bytes());
+    let mut kexinit = KexInit {
+        exchange,
+        algo: None,
+        sent: false,
+        session_id: None,
+    };
+    let cipher = Arc::new(Mutex::new(cipher::CLEAR_PAIR));
+    let mac = Arc::new(Mutex::new(mac::CLEAR_PAIR));
+    let mut write_buffer = SSHBuffer::new();
+    kexinit.server_write(
+        config.as_ref(),
+        &mut cipher.lock().unwrap(),
+        &mac.lock().unwrap(),
+        &mut write_buffer
+    )?;
+    Ok(CommonSession {
+        write_buffer,
+        kex: Some(Kex::KexInit(kexinit)),
+        auth_user: String::new(),
+        auth_method: None, // Client only.
+        cipher,
+        mac,
+        encrypted: None,
+        config,
+        wants_reply: false,
+        disconnected: false,
+        buffer: CryptoVec::new(),
     })
+}
+
+async fn reply<H: Handler>(
+    mut session: Session,
+    handler: &mut Option<H>,
+    buf: &[u8],
+) -> Result<Session, H::Error> {
+    // Handle key exchange/re-exchange.
+    if session.common.encrypted.is_none() {
+        match session.common.kex.take() {
+            Some(Kex::KexInit(kexinit)) => {
+                if kexinit.algo.is_some() || buf[0] == msg::KEXINIT {
+                    session.common.kex = Some(kexinit.server_parse(
+                        session.common.config.as_ref(),
+                        &mut session.common.cipher.lock().unwrap(),
+                        &session.common.mac.lock().unwrap(),
+                        &buf,
+                        &mut session.common.write_buffer,
+                    )?);
+                    return Ok(session);
+                } else {
+                    // Else, i.e. if the other side has not started
+                    // the key exchange, process its packets by simple
+                    // not returning.
+                    session.common.kex = Some(Kex::KexInit(kexinit))
+                }
+            }
+            Some(Kex::KexDh(kexdh)) => {
+                session.common.kex = Some(kexdh.parse(
+                    session.common.config.as_ref(),
+                    &mut session.common.cipher.lock().unwrap(),
+                    &session.common.mac.lock().unwrap(),
+                    buf,
+                    &mut session.common.write_buffer,
+                )?);
+                return Ok(session);
+            }
+            Some(Kex::NewKeys(newkeys)) => {
+                if buf[0] != msg::NEWKEYS {
+                    return Err(Error::Kex.into());
+                }
+                // Ok, NEWKEYS received, now encrypted.
+                session.common.encrypted(
+                    EncryptedState::WaitingServiceRequest {
+                        sent: false,
+                        accepted: false,
+                    },
+                    newkeys,
+                );
+                return Ok(session);
+            }
+            Some(kex) => {
+                session.common.kex = Some(kex);
+                return Ok(session);
+            }
+            None => {}
+        }
+        Ok(session)
+    } else {
+        Ok(session.server_read_encrypted(handler, buf).await?)
+    }
 }

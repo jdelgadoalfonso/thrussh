@@ -14,14 +14,24 @@
 //
 
 use super::super::Error;
-use sodium::Sodium;
 use sodium::aes_128_ctr::{
-    Aes128Ctr, NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek, GenericArray,
-    KEY_BYTES, NONCE_BYTES, Nonce, Key
+    Aes128Ctr, NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek,
+    GenericArray, KEY_BYTES, NONCE_BYTES, Nonce, Key
 };
 
-pub struct OpeningKey { iv: Nonce, key: Key, aes128_ctr: Aes128Ctr, sodium: Sodium }
-pub struct SealingKey { iv: Nonce, key: Key, aes128_ctr: Aes128Ctr, sodium: Sodium }
+#[allow(dead_code)]
+pub struct OpeningKey {
+    iv: Nonce,
+    key: Key,
+    aes128_ctr: Aes128Ctr,
+}
+
+#[allow(dead_code)]
+pub struct SealingKey {
+    iv: Nonce,
+    key: Key,
+    aes128_ctr: Aes128Ctr,
+}
 
 const TAG_LEN: usize = 0;
 const BLOCK_SIZE: usize = 16;
@@ -46,7 +56,7 @@ fn make_sealing_cipher(k: &[u8], i: Option<&[u8]>) -> super::SealingCipher {
     // create cipher instance
     let cipher = Aes128Ctr::new(&g_key, &g_nonce);
     super::SealingCipher::Aes128Ctr(SealingKey {
-        iv, key, aes128_ctr: cipher, sodium: Sodium::new()
+        iv, key, aes128_ctr: cipher
     })
 }
 
@@ -60,23 +70,21 @@ fn make_opening_cipher(k: &[u8], i: Option<&[u8]>) -> super::OpeningCipher {
     // create cipher instance
     let cipher = Aes128Ctr::new(&g_key, &g_nonce);
     super::OpeningCipher::Aes128Ctr(OpeningKey {
-        iv, key, aes128_ctr: cipher, sodium: Sodium::new()
+        iv, key, aes128_ctr: cipher
     })
 }
 
 impl super::OpeningKey for OpeningKey {
-
     fn decrypt_packet_length(
         &mut self,
         _sequence_number: u32,
         mut encrypted_packet_length: [u8; 4],
     ) -> [u8; 4] {
-        //let pos: u64 = self.aes128_ctr.current_pos();
-        let mut p = self.aes128_ctr.clone();
-//        self.sodium.apply_aes128ctr(&mut encrypted_packet_length, &self.iv, &self.key);
-       // self.aes128_ctr.apply_keystream(&mut encrypted_packet_length);
-       // self.aes128_ctr.seek(pos);
-        p.apply_keystream(&mut encrypted_packet_length);
+        let pos: u64 = self.aes128_ctr.current_pos();
+        //let mut p = self.aes128_ctr.clone();
+        // p.apply_keystream(&mut encrypted_packet_length);
+        self.aes128_ctr.apply_keystream(&mut encrypted_packet_length);
+        self.aes128_ctr.seek(pos);
         encrypted_packet_length
     }
 
@@ -97,13 +105,12 @@ impl super::OpeningKey for OpeningKey {
 }
 
 impl super::SealingKey for SealingKey {
-
     fn padding_length(&self, payload: &[u8]) -> usize {
         let extra_len = super::PACKET_LENGTH_LEN + super::PADDING_LENGTH_LEN;
         let padding_len = if payload.len() + extra_len <= super::MINIMUM_PACKET_LEN {
             super::MINIMUM_PACKET_LEN - payload.len() - extra_len
         } else {
-            (BLOCK_SIZE - ((extra_len + payload.len()) % BLOCK_SIZE))
+            BLOCK_SIZE - ((extra_len + payload.len()) % BLOCK_SIZE)
         };
         if padding_len < super::PACKET_LENGTH_LEN {
             padding_len + BLOCK_SIZE

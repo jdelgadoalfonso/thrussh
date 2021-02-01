@@ -13,32 +13,26 @@
 // limitations under the License.
 //
 
-use std;
-use auth;
-use negotiation;
-use kex;
-use cipher;
-use mac;
-use msg;
-use {Error, ChannelId, Channel, Disconnect};
-use cryptovec::CryptoVec;
-use std::collections::HashMap;
-use Limits;
-use sshbuffer::SSHBuffer;
+use crate::sshbuffer::SSHBuffer;
+use crate::{auth, cipher, kex, mac, msg, negotiation};
+use crate::{Channel, ChannelId, Disconnect, Limits};
 use byteorder::{BigEndian, ByteOrder};
+use cryptovec::CryptoVec;
 use openssl::hash;
-use thrussh_keys::encoding::Encoding;
+use std::collections::HashMap;
 use std::num::Wrapping;
 use std::sync::{Arc, Mutex};
+use thrussh_keys::encoding::Encoding;
 
 #[derive(Debug)]
 pub(crate) struct Encrypted {
-    pub state: Option<EncryptedState>,
+    pub state: EncryptedState,
 
     // It's always Some, except when we std::mem::replace it temporarily.
     pub exchange: Option<Exchange>,
     pub kex: kex::Algorithm,
     pub key: usize,
+    pub mac: Option<&'static str>,
     pub session_id: hash::DigestBytes,
     pub rekey: Option<Kex>,
     pub channels: HashMap<ChannelId, Channel>,
@@ -47,6 +41,11 @@ pub(crate) struct Encrypted {
     pub write: CryptoVec,
     pub write_cursor: usize,
     pub last_rekey: std::time::Instant,
+    pub server_compression: crate::compression::Compression,
+    pub client_compression: crate::compression::Compression,
+    pub compress: crate::compression::Compress,
+    pub decompress: crate::compression::Decompress,
+    pub compress_buffer: CryptoVec,
 }
 
 pub(crate) struct CommonSession<Config> {
@@ -57,38 +56,51 @@ pub(crate) struct CommonSession<Config> {
     pub write_buffer: SSHBuffer,
     pub kex: Option<Kex>,
     pub cipher: Arc<Mutex<cipher::CipherPair>>,
-    pub mac: Arc<mac::MacPair>,
+    pub mac: Arc<Mutex<mac::MacPair>>,
     pub wants_reply: bool,
     pub disconnected: bool,
-    pub buffer: Option<CryptoVec>,
+    pub buffer: CryptoVec,
 }
 
 impl<C> CommonSession<C> {
-    pub fn encrypted(&mut self, state: EncryptedState, newkeys: NewKeys) {
+    pub fn newkeys(&mut self, newkeys: NewKeys) {
         if let Some(ref mut enc) = self.encrypted {
             enc.exchange = Some(newkeys.exchange);
             enc.kex = newkeys.kex;
             enc.key = newkeys.key;
-            self.mac = Arc::new(newkeys.mac);
-            self.cipher = Arc::new(Mutex::new(newkeys.cipher));
-        } else {
-            self.encrypted = Some(Encrypted {
-                exchange: Some(newkeys.exchange),
-                kex: newkeys.kex,
-                key: newkeys.key,
-                session_id: newkeys.session_id,
-                state: Some(state),
-                rekey: None,
-                channels: HashMap::new(),
-                last_channel_id: Wrapping(1),
-                wants_reply: false,
-                write: CryptoVec::new(),
-                write_cursor: 0,
-                last_rekey: std::time::Instant::now(),
-            });
-            self.mac = Arc::new(newkeys.mac);
-            self.cipher = Arc::new(Mutex::new(newkeys.cipher));
+            enc.mac = newkeys.names.mac.map(|n| n.clone().get_str());
+            let mut cipher = self.cipher.lock().unwrap();
+            *cipher = newkeys.cipher;
+            let mut mac = self.mac.lock().unwrap();
+            *mac = newkeys.mac;
         }
+    }
+
+    pub fn encrypted(&mut self, state: EncryptedState, newkeys: NewKeys) {
+        self.encrypted = Some(Encrypted {
+            exchange: Some(newkeys.exchange),
+            kex: newkeys.kex,
+            key: newkeys.key,
+            mac: newkeys.names.mac.map(|n| n.clone().get_str()),
+            session_id: newkeys.session_id,
+            state,
+            rekey: None,
+            channels: HashMap::new(),
+            last_channel_id: Wrapping(1),
+            wants_reply: false,
+            write: CryptoVec::new(),
+            write_cursor: 0,
+            last_rekey: std::time::Instant::now(),
+            server_compression: newkeys.names.server_compression,
+            client_compression: newkeys.names.client_compression,
+            compress: crate::compression::Compress::None,
+            compress_buffer: CryptoVec::new(),
+            decompress: crate::compression::Decompress::None,
+        });
+        let mut cipher = self.cipher.lock().unwrap();
+        *cipher = newkeys.cipher;
+        let mut mac = self.mac.lock().unwrap();
+        *mac = newkeys.mac;
     }
 
     /// Send a disconnect message.
@@ -114,18 +126,41 @@ impl<C> CommonSession<C> {
     /// Send a single byte message onto the channel.
     pub fn byte(&mut self, channel: ChannelId, msg: u8) {
         if let Some(ref mut enc) = self.encrypted {
-            if let Some(channel) = enc.channels.get(&channel) {
-                push_packet!(enc.write, {
-                    enc.write.push(msg);
-                    enc.write.push_u32_be(channel.recipient_channel);
-                });
-            }
+            enc.byte(channel, msg)
         }
     }
 }
 
 impl Encrypted {
-    pub fn adjust_window_size(&mut self, channel: ChannelId, data: &[u8], target: u32) {
+    pub fn byte(&mut self, channel: ChannelId, msg: u8) {
+        if let Some(channel) = self.channels.get(&channel) {
+            push_packet!(self.write, {
+                self.write.push(msg);
+                self.write.push_u32_be(channel.recipient_channel);
+            });
+        }
+    }
+
+    /*
+    pub fn authenticated(&mut self) {
+        self.server_compression.init_compress(&mut self.compress);
+        self.state = EncryptedState::Authenticated;
+    }
+    */
+
+    pub fn eof(&mut self, channel: ChannelId) {
+        self.byte(channel, msg::CHANNEL_EOF);
+    }
+
+    pub fn sender_window_size(&self, channel: ChannelId) -> usize {
+        if let Some(ref channel) = self.channels.get(&channel) {
+            channel.sender_window_size as usize
+        } else {
+            0
+        }
+    }
+
+    pub fn adjust_window_size(&mut self, channel: ChannelId, data: &[u8], target: u32) -> bool {
         debug!("adjust_window_size");
         if let Some(ref mut channel) = self.channels.get_mut(&channel) {
             debug!("channel {:?}", channel);
@@ -137,8 +172,7 @@ impl Encrypted {
             if channel.sender_window_size < target / 2 {
                 debug!(
                     "sender_window_size {:?}, target {:?}",
-                    channel.sender_window_size,
-                    target
+                    channel.sender_window_size, target
                 );
                 push_packet!(self.write, {
                     self.write.push(msg::CHANNEL_WINDOW_ADJUST);
@@ -146,41 +180,104 @@ impl Encrypted {
                     self.write.push_u32_be(target - channel.sender_window_size);
                 });
                 channel.sender_window_size = target;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn flush_pending(&mut self, channel: ChannelId) -> usize {
+        let mut pending_size = 0;
+        if let Some(channel) = self.channels.get_mut(&channel) {
+            while let Some((buf, a, size)) = channel.pending_data.pop_front() {
+                let (buf, size_) = Self::data_noqueue(&mut self.write, channel, buf, size);
+                pending_size += size_;
+                if size_ < buf.len() {
+                    channel.pending_data.push_front((buf, a, size_));
+                    break;
+                }
+            }
+        }
+        pending_size
+    }
+
+    pub fn has_pending_data(&self, channel: ChannelId) -> bool {
+        if let Some(channel) = self.channels.get(&channel) {
+            !channel.pending_data.is_empty()
+        } else {
+            false
+        }
+    }
+
+    fn data_noqueue(
+        write: &mut CryptoVec,
+        channel: &mut Channel,
+        buf0: CryptoVec,
+        from: usize,
+    ) -> (CryptoVec, usize) {
+        let mut buf = if buf0.len() as u32 > from as u32 + channel.recipient_window_size {
+            &buf0[from..from + channel.recipient_window_size as usize]
+        } else {
+            &buf0[from..]
+        };
+        let buf_len = buf.len();
+
+        while buf.len() > 0 {
+            // Compute the length we're allowed to send.
+            let off = std::cmp::min(buf.len(), channel.recipient_maximum_packet_size as usize);
+            push_packet!(write, {
+                write.push(msg::CHANNEL_DATA);
+                write.push_u32_be(channel.recipient_channel);
+                write.extend_ssh_string(&buf[..off]);
+            });
+            debug!(
+                "buffer: {:?} {:?}",
+                write.len(),
+                channel.recipient_window_size
+            );
+            channel.recipient_window_size -= off as u32;
+            buf = &buf[off..]
+        }
+        debug!("buf.len() = {:?}, buf_len = {:?}", buf.len(), buf_len);
+        (buf0, from + buf_len)
+    }
+
+    pub fn data(&mut self, channel: ChannelId, buf0: CryptoVec) {
+        if let Some(channel) = self.channels.get_mut(&channel) {
+            assert!(channel.confirmed);
+            if !channel.pending_data.is_empty() {
+                channel.pending_data.push_back((buf0, None, 0));
+                return;
+            }
+            let (buf0, buf_len) = Self::data_noqueue(&mut self.write, channel, buf0, 0);
+            if buf_len < buf0.len() {
+                channel.pending_data.push_back((buf0, None, buf_len))
             }
         }
     }
 
-    pub fn data(&mut self, channel: ChannelId, extended: Option<u32>, buf: &[u8]) -> usize {
+    pub fn extended_data(&mut self, channel: ChannelId, ext: u32, buf0: CryptoVec) {
         use std::ops::Deref;
         if let Some(channel) = self.channels.get_mut(&channel) {
             assert!(channel.confirmed);
-            debug!(
-                "output {:?} {:?} {:?}",
-                channel,
-                buf.len(),
-                &buf[..std::cmp::min(buf.len(), 100)]
-            );
-            debug!("output {:?}", self.write.deref());
-            let mut buf = if buf.len() as u32 > channel.recipient_window_size {
-                &buf[0..channel.recipient_window_size as usize]
+            if !channel.pending_data.is_empty() {
+                channel.pending_data.push_back((buf0, Some(ext), 0));
+                return;
+            }
+            let mut buf = if buf0.len() as u32 > channel.recipient_window_size {
+                &buf0[0..channel.recipient_window_size as usize]
             } else {
-                buf
+                &buf0
             };
             let buf_len = buf.len();
 
             while buf.len() > 0 {
                 // Compute the length we're allowed to send.
                 let off = std::cmp::min(buf.len(), channel.recipient_maximum_packet_size as usize);
-                let off = std::cmp::min(off, channel.recipient_window_size as usize);
                 push_packet!(self.write, {
-                    if let Some(ext) = extended {
-                        self.write.push(msg::CHANNEL_EXTENDED_DATA);
-                        self.write.push_u32_be(channel.recipient_channel);
-                        self.write.push_u32_be(ext);
-                    } else {
-                        self.write.push(msg::CHANNEL_DATA);
-                        self.write.push_u32_be(channel.recipient_channel);
-                    }
+                    self.write.push(msg::CHANNEL_EXTENDED_DATA);
+                    self.write.push_u32_be(channel.recipient_channel);
+                    self.write.push_u32_be(ext);
                     self.write.extend_ssh_string(&buf[..off]);
                 });
                 debug!("buffer: {:?}", self.write.deref().len());
@@ -188,9 +285,9 @@ impl Encrypted {
                 buf = &buf[off..]
             }
             debug!("buf.len() = {:?}, buf_len = {:?}", buf.len(), buf_len);
-            buf_len
-        } else {
-            0
+            if buf_len < buf0.len() {
+                channel.pending_data.push_back((buf0, Some(ext), buf_len))
+            }
         }
     }
 
@@ -204,32 +301,17 @@ impl Encrypted {
         // If there are pending packets (and we've not started to rekey), flush them.
         {
             while self.write_cursor < self.write.len() {
-
-                let now = std::time::Instant::now();
-                let dur = now.duration_since(self.last_rekey);
-
-                if write_buffer.bytes >= limits.rekey_write_limit ||
-                    dur >= limits.rekey_time_limit
-                {
-
-                    // Resetting those now is not strictly correct
-                    // (since we're resetting before the rekeying),
-                    // but since the bytes sent during rekeying will
-                    // be counted, the limits are still an upper bound
-                    // on the size that can be sent.
-                    write_buffer.bytes = 0;
-                    self.last_rekey = now;
-                    return true;
-
-                } else {
-                    // Read a single packet, selfrypt and send it.
-                    let len = BigEndian::read_u32(&self.write[self.write_cursor..]) as usize;
-                    debug!("flushing len {:?}", len);
-                    let packet = &self.write[(self.write_cursor + 4)..
-                                             (self.write_cursor + 4 + len)];
-                    cipher.write(packet, write_buffer, mac);
-                    self.write_cursor += 4 + len
-                }
+                // Read a single packet, encrypt and send it.
+                let len = BigEndian::read_u32(&self.write[self.write_cursor..]) as usize;
+                let packet = self
+                    .compress
+                    .compress(
+                        &self.write[(self.write_cursor + 4)..(self.write_cursor + 4 + len)],
+                        &mut self.compress_buffer,
+                    )
+                    .unwrap();
+                cipher.write(packet, write_buffer, mac);
+                self.write_cursor += 4 + len
             }
         }
         if self.write_cursor >= self.write.len() {
@@ -237,13 +319,15 @@ impl Encrypted {
             self.write_cursor = 0;
             self.write.clear();
         }
-        false
+        let now = std::time::Instant::now();
+        let dur = now.duration_since(self.last_rekey);
+        write_buffer.bytes >= limits.rekey_write_limit || dur >= limits.rekey_time_limit
     }
     pub fn new_channel_id(&mut self) -> ChannelId {
         self.last_channel_id += Wrapping(1);
-        while self.channels.contains_key(
-            &ChannelId(self.last_channel_id.0),
-        )
+        while self
+            .channels
+            .contains_key(&ChannelId(self.last_channel_id.0))
         {
             self.last_channel_id += Wrapping(1)
         }
@@ -264,6 +348,7 @@ impl Encrypted {
                     recipient_maximum_packet_size: 0,
                     confirmed: false,
                     wants_reply: false,
+                    pending_data: std::collections::VecDeque::new(),
                 });
                 return ChannelId(self.last_channel_id.0);
             }
@@ -271,16 +356,13 @@ impl Encrypted {
     }
 }
 
-
-
-
 #[derive(Debug)]
 pub enum EncryptedState {
-    WaitingServiceRequest,
+    WaitingServiceRequest { sent: bool, accepted: bool },
     WaitingAuthRequest(auth::AuthRequest),
+    InitCompression,
     Authenticated,
 }
-
 
 #[derive(Debug)]
 pub struct Exchange {
@@ -322,7 +404,6 @@ pub enum Kex {
     NewKeys(NewKeys),
 }
 
-
 #[derive(Debug)]
 pub struct KexInit {
     pub algo: Option<negotiation::Names>,
@@ -330,7 +411,6 @@ pub struct KexInit {
     pub session_id: Option<hash::DigestBytes>,
     pub sent: bool,
 }
-
 
 impl KexInit {
     pub fn received_rekey(
@@ -387,25 +467,22 @@ impl KexDhDone {
     pub fn compute_keys(
         self,
         hash: hash::DigestBytes,
-        buffer: &mut CryptoVec,
-        buffer2: &mut CryptoVec,
         is_server: bool,
-    ) -> Result<NewKeys, Error> {
+    ) -> Result<NewKeys, crate::Error> {
         let session_id = if let Some(session_id) = self.session_id {
             session_id
         } else {
             hash.clone()
         };
         // Now computing keys.
-        let (c, m) = self.kex.compute_keys(
-            &session_id,
-            &hash,
-            buffer,
-            buffer2,
-            self.names.cipher,
-            self.names.mac,
-            is_server,
-        )?;
+        let (c, m) = self
+            .kex
+            .compute_keys(
+                &session_id,
+                &hash,
+                self.names.cipher,
+                self.names.mac.map(|_| mac::HMAC_SHA2_256::NAME).unwrap_or(mac::NONE::NAME), // TODO
+                is_server)?;
         Ok(NewKeys {
             exchange: self.exchange,
             names: self.names,
@@ -413,7 +490,7 @@ impl KexDhDone {
             key: self.key,
             cipher: c,
             mac: m,
-            session_id: session_id,
+            session_id,
             received: false,
             sent: false,
         })

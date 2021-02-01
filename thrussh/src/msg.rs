@@ -26,7 +26,6 @@ pub const SERVICE_ACCEPT: u8 = 6;
 pub const KEXINIT: u8 = 20;
 pub const NEWKEYS: u8 = 21;
 
-
 // http://tools.ietf.org/html/rfc5656#section-7.1
 pub const KEX_ECDH_INIT: u8 = 30;
 pub const KEX_ECDH_REPLY: u8 = 31;
@@ -41,7 +40,6 @@ pub const USERAUTH_PK_OK: u8 = 60;
 // https://tools.ietf.org/html/rfc4256#section-5
 pub const USERAUTH_INFO_REQUEST: u8 = 60;
 pub const USERAUTH_INFO_RESPONSE: u8 = 61;
-
 
 // https://tools.ietf.org/html/rfc4254#section-9
 pub const GLOBAL_REQUEST: u8 = 80;

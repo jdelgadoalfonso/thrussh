@@ -6,9 +6,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use byteorder::{BigEndian, LittleEndian, ByteOrder};
+use crate::blowfish::*;
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use openssl::sha::Sha512;
-use blowfish::*;
 
 fn bcrypt_hash(hpass: &[u8], hsalt: &[u8], output: &mut [u8; 32]) {
     let mut bf = Blowfish::init_state();
@@ -20,24 +20,26 @@ fn bcrypt_hash(hpass: &[u8], hsalt: &[u8], output: &mut [u8; 32]) {
     }
 
     // b"OxychromaticBlowfishSwatDynamite"
-    let mut buf:[u32; 8] = [1333295459, 1752330093, 1635019107, 1114402679, 1718186856, 1400332660, 1148808801, 1835627621];
+    let mut buf: [u32; 8] = [
+        1333295459, 1752330093, 1635019107, 1114402679, 1718186856, 1400332660, 1148808801,
+        1835627621,
+    ];
     let mut i = 0;
     while i < 8 {
         for _ in 0..64 {
-            let (l, r) = bf.encrypt(buf[i], buf[i+1]);
+            let (l, r) = bf.encrypt(buf[i], buf[i + 1]);
             buf[i] = l;
-            buf[i+1] = r;
+            buf[i + 1] = r;
         }
         i += 2
     }
 
     for i in 0..8 {
-        LittleEndian::write_u32(&mut output[i*4..(i+1)*4], buf[i]);
+        LittleEndian::write_u32(&mut output[i * 4..(i + 1) * 4], buf[i]);
     }
 }
 
 pub fn bcrypt_pbkdf(password: &[u8], salt: &[u8], rounds: u32, output: &mut [u8]) {
-
     assert!(password.len() > 0);
     assert!(salt.len() > 0);
     assert!(rounds > 0);
@@ -52,9 +54,9 @@ pub fn bcrypt_pbkdf(password: &[u8], salt: &[u8], rounds: u32, output: &mut [u8]
         hasher.finish()
     };
 
-    for block in 1..(nblocks+1) {
+    for block in 1..(nblocks + 1) {
         let mut count = [0u8; 4];
-        let mut out   = [0u8; 32];
+        let mut out = [0u8; 32];
         BigEndian::write_u32(&mut count, block as u32);
 
         let mut hasher = Sha512::new();
@@ -66,7 +68,6 @@ pub fn bcrypt_pbkdf(password: &[u8], salt: &[u8], rounds: u32, output: &mut [u8]
         let mut tmp = out;
 
         for _ in 1..rounds {
-
             let mut hasher = Sha512::new();
             hasher.update(&tmp);
             let hsalt = hasher.finish();
@@ -77,7 +78,7 @@ pub fn bcrypt_pbkdf(password: &[u8], salt: &[u8], rounds: u32, output: &mut [u8]
             }
 
             for i in 0..out.len() {
-                let idx = i * nblocks + (block-1);
+                let idx = i * nblocks + (block - 1);
                 if idx < output.len() {
                     output[idx] = out[i];
                 }

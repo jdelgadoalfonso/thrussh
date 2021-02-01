@@ -16,12 +16,17 @@
 // http://cvsweb.openbsd.org/cgi-bin/cvsweb/src/usr.bin/ssh/PROTOCOL.chacha20poly1305?annotate=HEAD
 
 use super::super::Error;
-use sodium::Sodium;
-use sodium::chacha20::{KEY_BYTES, NONCE_BYTES, Nonce, Key};
-use byteorder::{ByteOrder, BigEndian};
+use byteorder::{BigEndian, ByteOrder};
+use sodium::chacha20::*;
 
-pub struct OpeningKey { k1: Key, k2: Key, sodium: Sodium }
-pub struct SealingKey { k1: Key, k2: Key, sodium: Sodium }
+pub struct OpeningKey {
+    k1: Key,
+    k2: Key,
+}
+pub struct SealingKey {
+    k1: Key,
+    k2: Key,
+}
 
 const TAG_LEN: usize = 16;
 
@@ -35,38 +40,37 @@ pub static CIPHER: super::Cipher = super::Cipher {
 
 pub const NAME: super::Name = super::Name("chacha20-poly1305@openssh.com");
 
-fn make_sealing_cipher(k: &[u8], _: Option<&[u8]>) -> super::SealingCipher {
+fn make_sealing_cipher(k: &[u8], _i: Option<&[u8]>) -> super::SealingCipher {
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
     k2.0.clone_from_slice(&k[..KEY_BYTES]);
-    super::SealingCipher::Chacha20Poly1305(SealingKey { k1, k2, sodium: Sodium::new() })
+    super::SealingCipher::Chacha20Poly1305(SealingKey { k1, k2 })
 }
 
-fn make_opening_cipher(k: &[u8], _: Option<&[u8]>) -> super::OpeningCipher {
+fn make_opening_cipher(k: &[u8], _i: Option<&[u8]>) -> super::OpeningCipher {
     let mut k1 = Key([0; KEY_BYTES]);
     let mut k2 = Key([0; KEY_BYTES]);
     k1.0.clone_from_slice(&k[KEY_BYTES..]);
     k2.0.clone_from_slice(&k[..KEY_BYTES]);
-    super::OpeningCipher::Chacha20Poly1305(OpeningKey { k1, k2, sodium: Sodium::new() })
+    super::OpeningCipher::Chacha20Poly1305(OpeningKey { k1, k2 })
 }
 
 fn make_counter(sequence_number: u32) -> Nonce {
     let mut nonce = Nonce([0; NONCE_BYTES]);
-    let i0 = NONCE_BYTES-4;
+    let i0 = NONCE_BYTES - 4;
     BigEndian::write_u32(&mut nonce.0[i0..], sequence_number);
     nonce
 }
 
 impl super::OpeningKey for OpeningKey {
-
     fn decrypt_packet_length(
         &mut self,
         sequence_number: u32,
         mut encrypted_packet_length: [u8; 4],
     ) -> [u8; 4] {
         let nonce = make_counter(sequence_number);
-        self.sodium.chacha20_xor(&mut encrypted_packet_length, &nonce, &self.k1);
+        chacha20_xor(&mut encrypted_packet_length, &nonce, &self.k1);
         encrypted_packet_length
     }
 
@@ -80,32 +84,30 @@ impl super::OpeningKey for OpeningKey {
         ciphertext_in_plaintext_out: &'a mut [u8],
         tag: &[u8],
     ) -> Result<&'a [u8], Error> {
-
         let nonce = make_counter(sequence_number);
         {
-            use sodium::poly1305::Key;
+            use sodium::poly1305::*;
             let mut poly_key = Key([0; 32]);
-            self.sodium.chacha20_xor(&mut poly_key.0, &nonce, &self.k2);
+            chacha20_xor(&mut poly_key.0, &nonce, &self.k2);
             // let mut tag_ = Tag([0; 16]);
             // tag_.0.clone_from_slice(tag);
-            if !self.sodium.poly1305_verify(&tag, ciphertext_in_plaintext_out, &poly_key) {
-                return Err(Error::PacketAuth)
+            if !poly1305_verify(&tag, ciphertext_in_plaintext_out, &poly_key) {
+                return Err(Error::PacketAuth);
             }
         }
-        self.sodium.chacha20_xor_ic(&mut ciphertext_in_plaintext_out[4..], &nonce, 1, &self.k2);
+        chacha20_xor_ic(&mut ciphertext_in_plaintext_out[4..], &nonce, 1, &self.k2);
         Ok(&ciphertext_in_plaintext_out[4..])
     }
 }
 
 impl super::SealingKey for SealingKey {
-
     fn padding_length(&self, payload: &[u8]) -> usize {
         let block_size = 8;
         let extra_len = super::PACKET_LENGTH_LEN + super::PADDING_LENGTH_LEN;
         let padding_len = if payload.len() + extra_len <= super::MINIMUM_PACKET_LEN {
             super::MINIMUM_PACKET_LEN - payload.len() - super::PADDING_LENGTH_LEN
         } else {
-            (block_size - ((super::PADDING_LENGTH_LEN + payload.len()) % block_size))
+            block_size - ((super::PADDING_LENGTH_LEN + payload.len()) % block_size)
         };
         if padding_len < super::PACKET_LENGTH_LEN {
             padding_len + block_size
@@ -138,14 +140,14 @@ impl super::SealingKey for SealingKey {
         let mut nonce = make_counter(sequence_number);
         {
             let (a, b) = plaintext_in_ciphertext_out.split_at_mut(4);
-            self.sodium.chacha20_xor(a, &nonce, &self.k1);
-            self.sodium.chacha20_xor_ic(b, &nonce, 1, &self.k2);
+            chacha20_xor(a, &nonce, &self.k1);
+            chacha20_xor_ic(b, &nonce, 1, &self.k2);
         }
         nonce.0[0] = 0;
-        use sodium::poly1305::Key;
+        use sodium::poly1305::*;
         let mut poly_key = Key([0; 32]);
-        self.sodium.chacha20_xor(&mut poly_key.0, &nonce, &self.k2);
-        let tag = self.sodium.poly1305_auth(plaintext_in_ciphertext_out, &poly_key);
+        chacha20_xor(&mut poly_key.0, &nonce, &self.k2);
+        let tag = poly1305_auth(plaintext_in_ciphertext_out, &poly_key);
         tag_out.clone_from_slice(&tag.0);
     }
 }

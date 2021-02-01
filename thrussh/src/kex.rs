@@ -12,19 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use byteorder::{ByteOrder, BigEndian};
-use std;
-use Error;
-use msg;
+use crate::{cipher, key, mac, msg};
+use byteorder::{BigEndian, ByteOrder};
 
+use crate::session::Exchange;
 use cryptovec::CryptoVec;
-use session::Exchange;
-use key;
-use cipher;
-use mac;
-use thrussh_keys::encoding::Encoding;
 use openssl;
 use sodium;
+use std::cell::RefCell;
+use thrussh_keys::encoding::Encoding;
 
 #[doc(hidden)]
 pub struct Algorithm {
@@ -50,6 +46,11 @@ impl AsRef<str> for Name {
 }
 pub const CURVE25519: Name = Name("curve25519-sha256@libssh.org");
 
+thread_local! {
+    static KEY_BUF: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
+    static BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
+}
+
 // We used to support curve "NIST P-256" here, but the security of
 // that curve is controversial, see
 // http://safecurves.cr.yp.to/rigid.html
@@ -60,29 +61,28 @@ impl Algorithm {
         _name: Name,
         exchange: &mut Exchange,
         payload: &[u8],
-    ) -> Result<Algorithm, Error> {
+    ) -> Result<Algorithm, crate::Error> {
         debug!("server_dh");
 
         assert_eq!(payload[0], msg::KEX_ECDH_INIT);
         let mut client_pubkey = GroupElement([0; 32]);
         {
             let pubkey_len = BigEndian::read_u32(&payload[1..]) as usize;
-            client_pubkey.0.clone_from_slice(
-                &payload[5..(5 + pubkey_len)],
-            )
+            client_pubkey
+                .0
+                .clone_from_slice(&payload[5..(5 + pubkey_len)])
         };
         debug!("client_pubkey: {:?}", client_pubkey);
-        use sodium::scalarmult::*;
         use openssl::rand::*;
+        use sodium::scalarmult::*;
         let mut server_secret = Scalar([0; 32]);
         rand_bytes(&mut server_secret.0)?;
-        let sodium = sodium::Sodium::new();
-        let server_pubkey = sodium.scalarmult_base(&server_secret);
+        let server_pubkey = scalarmult_base(&server_secret);
 
         // fill exchange.
         exchange.server_ephemeral.clear();
         exchange.server_ephemeral.extend(&server_pubkey.0);
-        let shared = sodium.scalarmult(&server_secret, &client_pubkey);
+        let shared = scalarmult(&server_secret, &client_pubkey);
         Ok(Algorithm {
             local_secret: None,
             shared_secret: Some(shared),
@@ -94,14 +94,12 @@ impl Algorithm {
         _name: Name,
         client_ephemeral: &mut CryptoVec,
         buf: &mut CryptoVec,
-    ) -> Result<Algorithm, Error> {
-
-        use sodium::scalarmult::*;
+    ) -> Result<Algorithm, crate::Error> {
         use openssl::rand::*;
+        use sodium::scalarmult::*;
         let mut client_secret = Scalar([0; 32]);
         rand_bytes(&mut client_secret.0)?;
-        let sodium = sodium::Sodium::new();
-        let client_pubkey = sodium.scalarmult_base(&client_secret);
+        let client_pubkey = scalarmult_base(&client_secret);
 
         // fill exchange.
         client_ephemeral.clear();
@@ -110,21 +108,19 @@ impl Algorithm {
         buf.push(msg::KEX_ECDH_INIT);
         buf.extend_ssh_string(&client_pubkey.0);
 
-
         Ok(Algorithm {
             local_secret: Some(client_secret),
             shared_secret: None,
         })
     }
 
-    pub fn compute_shared_secret(&mut self, remote_pubkey_: &[u8]) -> Result<(), Error> {
+    pub fn compute_shared_secret(&mut self, remote_pubkey_: &[u8]) -> Result<(), crate::Error> {
         let local_secret = std::mem::replace(&mut self.local_secret, None).unwrap();
 
         use sodium::scalarmult::*;
         let mut remote_pubkey = GroupElement([0; 32]);
         remote_pubkey.0.clone_from_slice(remote_pubkey_);
-        let sodium = sodium::Sodium::new();
-        let shared = sodium.scalarmult(&local_secret, &remote_pubkey);
+        let shared = scalarmult(&local_secret, &remote_pubkey);
         self.shared_secret = Some(shared);
         Ok(())
     }
@@ -134,14 +130,13 @@ impl Algorithm {
         key: &K,
         exchange: &Exchange,
         buffer: &mut CryptoVec,
-    ) -> Result<openssl::hash::DigestBytes, Error> {
+    ) -> Result<openssl::hash::DigestBytes, crate::Error> {
         // Computing the exchange hash, see page 7 of RFC 5656.
         buffer.clear();
         buffer.extend_ssh_string(&exchange.client_id);
         buffer.extend_ssh_string(&exchange.server_id);
         buffer.extend_ssh_string(&exchange.client_kex_init);
         buffer.extend_ssh_string(&exchange.server_kex_init);
-
 
         key.push_to(buffer);
         buffer.extend_ssh_string(&exchange.client_ephemeral);
@@ -159,33 +154,30 @@ impl Algorithm {
         Ok(hash)
     }
 
-
     pub fn compute_keys(
         &self,
         session_id: &openssl::hash::DigestBytes,
         exchange_hash: &openssl::hash::DigestBytes,
-        buffer: &mut CryptoVec,
-        key: &mut CryptoVec,
         cipher: cipher::Name,
-        mac: mac::Name,
+        mac_name: mac::Name,
         is_server: bool,
-    ) -> Result<(super::cipher::CipherPair, super::mac::MacPair), Error> {
+    ) -> Result<(super::cipher::CipherPair, super::mac::MacPair), crate::Error> {
         let cipher = match cipher {
             super::cipher::chacha20poly1305::NAME => &super::cipher::chacha20poly1305::CIPHER,
             super::cipher::aes128ctr::NAME => &super::cipher::aes128ctr::CIPHER,
             _ => unreachable!(),
         };
-        let mac = match mac {
+        let mac = match mac_name {
             super::mac::HMAC_SHA2_256::NAME => &super::mac::HMAC_BUILDER,
+            super::mac::NONE::NAME => &super::mac::HMAC_BUILDER, // Este builder no se usa
             _ => unreachable!(),
         };
-        let mut iv = CryptoVec::new();
-        let mut mac_key = CryptoVec::new();
-        let mut mac_key_l_to_r: [u8; 32] = [0; 32];
-        let mut mac_key_r_to_l: [u8; 32] = [0; 32];
 
         // https://tools.ietf.org/html/rfc4253#section-7.2
-        let mut compute_key = |c, key: &mut CryptoVec, len| -> Result<(), Error> {
+        BUFFER.with(|buffer| {
+            KEY_BUF.with(|key| {
+        let compute_key = |c, key: &mut CryptoVec, len| -> Result<(), crate::Error> {
+            let mut buffer = buffer.borrow_mut();
             buffer.clear();
             key.clear();
 
@@ -229,23 +221,30 @@ impl Algorithm {
             (b'A', b'C', b'E', b'B', b'D', b'F')
         };
 
+        let mut iv = CryptoVec::new();
+        let mut mac_key_l_to_r: [u8; 32] = [0; 32];
+        let mut mac_key_r_to_l: [u8; 32] = [0; 32];
+        let mut key = key.borrow_mut();
         if let Some(iv_len) = cipher.iv_len {
             compute_key(l_to_r_iv, &mut iv, iv_len)?;
         }
-        compute_key(l_to_r_key, key, cipher.key_len)?;
-        let local_to_remote = (cipher.make_sealing_cipher)(key, cipher.iv_len.map(|_| iv.as_ref()));
-        compute_key(l_to_r_mac, &mut mac_key, mac.key_len)?;
-        mac_key_l_to_r.clone_from_slice(mac_key.as_ref());
-        let local_to_remote_mac = (mac.make_integrity_key_sign)(&mac_key);
+        compute_key(l_to_r_key, &mut key, cipher.key_len)?;
+        let local_to_remote = (cipher.make_sealing_cipher)(&key, cipher.iv_len.map(|_| iv.as_ref()));
+        compute_key(l_to_r_mac, &mut key, mac.key_len)?;
+        mac_key_l_to_r.clone_from_slice(&key);
+        let local_to_remote_mac = (mac.make_integrity_key_sign)(&key);
 
         if let Some(iv_len) = cipher.iv_len {
             compute_key(r_to_l_iv, &mut iv, iv_len)?;
         }
-        compute_key(r_to_l_key, key, cipher.key_len)?;
-        let remote_to_local = (cipher.make_opening_cipher)(key, cipher.iv_len.map(|_| iv.as_ref()));
-        compute_key(r_to_l_mac, &mut mac_key, mac.key_len)?;
-        mac_key_r_to_l.clone_from_slice(mac_key.as_ref());
-        let remote_to_local_mac = (mac.make_integrity_key_verify)(&mac_key);
+        compute_key(r_to_l_key, &mut key, cipher.key_len)?;
+        let remote_to_local = (cipher.make_opening_cipher)(&key, cipher.iv_len.map(|_| iv.as_ref()));
+        compute_key(r_to_l_mac, &mut key, mac.key_len)?;
+        mac_key_r_to_l.clone_from_slice(&key);
+        let remote_to_local_mac = (mac.make_integrity_key_verify)(&key);
+
+        debug!("cipher l to r; {:?}", &local_to_remote);
+        debug!("cipher r to l; {:?}", &remote_to_local);
 
         Ok((super::cipher::CipherPair {
             local_to_remote,
@@ -254,5 +253,7 @@ impl Algorithm {
             local_to_remote: super::mac::HMacAlgo::HmacSha256(mac_key_l_to_r, local_to_remote_mac),
             remote_to_local: super::mac::HMacAlgo::HmacSha256(mac_key_r_to_l, remote_to_local_mac),
         }))
+        })
+    })
     }
 }

@@ -2,8 +2,9 @@ use cryptovec::CryptoVec;
 use hmac::{Hmac, Mac};
 use hmac::crypto_mac::MacError;
 use sha2::Sha256;
-use sshbuffer::SSHBuffer;
 use std::error::Error;
+
+use crate::sshbuffer::SSHBuffer;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -18,7 +19,19 @@ impl AsRef<str> for Name {
     }
 }
 
+impl Name {
+    pub fn get_str(self) -> &'static str {
+        self.0
+    }
+}
+
+#[allow(non_snake_case)]
+pub mod NONE {
+    pub const NAME: super::Name = super::Name("none");
+}
+
 /// The name of the hmac-sha2-512 algorithm for SSH.
+#[allow(non_snake_case)]
 pub mod HMAC_SHA2_256 {
     pub const NAME: super::Name = super::Name("hmac-sha2-256");
 }
@@ -30,12 +43,14 @@ pub struct HmacSha256Builder {
     pub make_integrity_key_sign: fn(key: &[u8]) -> HmacSha256,
 }
 
+#[allow(dead_code)]
 fn make_integrity_key_verify(key: &[u8]) -> HmacSha256 {
     debug!("hmac verify key: {:x?}", &key);
     HmacSha256::new_varkey(&key[..KEY_BYTES])
         .expect("HMAC can take key of any size")
 }
 
+#[allow(dead_code)]
 fn make_integrity_key_sign(key: &[u8]) -> HmacSha256 {
     debug!("hmac sign key: {:x?}", &key);
     HmacSha256::new_varkey(&key[..KEY_BYTES])
@@ -48,7 +63,6 @@ pub static HMAC_BUILDER: HmacSha256Builder = HmacSha256Builder {
     make_integrity_key_verify,
     make_integrity_key_sign,
 };
-
 
 #[derive(Debug)]
 pub enum HMacAlgo {
@@ -76,6 +90,7 @@ impl HMacAlgo {
         }
     }
 
+    #[allow(dead_code)]
     pub fn verify(&self, d: &[u8], s: &[u8]) -> Result<(), MacError> {
         if let Self::HmacSha256(_, ref mac) = self {
             let mut mac = mac.clone();
@@ -87,23 +102,18 @@ impl HMacAlgo {
     }
 }
 
+#[derive(Debug)]
 pub struct MacPair {
     pub local_to_remote: HMacAlgo,
     pub remote_to_local: HMacAlgo,
 }
 
-impl std::fmt::Debug for MacPair {
-    fn fmt(&self, _: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        Ok(()) // TODO?
-    }
-}
-
 impl MacPair {
-    pub fn sign(
-        &self, to_sign: &CryptoVec, buffer: &mut SSHBuffer
-    ) -> Result<(), Box<dyn Error>> {
+    pub fn sign(&self, to_sign: &CryptoVec, buffer: &mut SSHBuffer)
+    -> Result<(), Box<dyn Error>>
+    {
         self.local_to_remote
-            .sign(to_sign.as_ref())
+            .sign(&to_sign)
             .map(|r| {
                 debug!("hash: {:x?}", &r);
                 buffer.buffer.extend(&r);
@@ -111,6 +121,7 @@ impl MacPair {
             })
     }
 
+    #[allow(dead_code)]
     pub fn verify(&self, d: &[u8], s: &[u8]) -> Result<(), MacError> {
         self.remote_to_local.verify(d, s)
     }

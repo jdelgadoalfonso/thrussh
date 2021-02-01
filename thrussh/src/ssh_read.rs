@@ -1,10 +1,9 @@
-use std;
-use Error;
+use crate::Error;
 use cryptovec::CryptoVec;
-use futures::{Async, Poll};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tcp::Tcp;
-use std::io::ErrorKind;
+use futures::task::*;
+use std;
+use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
 /// The buffer to read the identification string (first line in the
 /// protocol).
@@ -43,29 +42,36 @@ impl std::fmt::Debug for ReadSshIdBuffer {
 /// connection, the `id` parameter is never used again.
 pub struct SshRead<R> {
     id: Option<ReadSshIdBuffer>,
-    r: R,
+    pub r: R,
 }
 
-impl<R: std::io::Read> std::io::Read for SshRead<R> {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        if let Some(mut id) = self.id.take() {
-            debug!("id {:?} {:?}", id.total, id.bytes_read);
-            if id.total > id.bytes_read {
-                let result = {
-                    let mut readable = &id.buf[id.bytes_read..id.total];
-                    readable.read(buf).unwrap()
-                };
-                debug!("read {:?} bytes from id.buf", result);
-                id.bytes_read += result;
-                self.id = Some(id);
-                return Ok(result);
-            }
-        }
-        self.r.read(buf)
+impl<R: AsyncRead + AsyncWrite> SshRead<R> {
+    pub fn split(self) -> (SshRead<tokio::io::ReadHalf<R>>, tokio::io::WriteHalf<R>) {
+        let (r, w) = tokio::io::split(self.r);
+        (SshRead { id: self.id, r }, w)
     }
 }
 
-impl<R: AsyncRead> AsyncRead for SshRead<R> {}
+impl<R: AsyncRead + Unpin> AsyncRead for SshRead<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut ReadBuf,
+    ) -> Poll<Result<(), std::io::Error>> {
+        if let Some(mut id) = self.id.take() {
+            debug!("id {:?} {:?}", id.total, id.bytes_read);
+            if id.total > id.bytes_read {
+                let total = id.total.min(id.bytes_read + buf.remaining());
+                let result = { buf.put_slice(&id.buf[id.bytes_read..total]) };
+                debug!("read {:?} bytes from id.buf", result);
+                id.bytes_read += total - id.bytes_read;
+                self.id = Some(id);
+                return Poll::Ready(Ok(()));
+            }
+        }
+        AsyncRead::poll_read(Pin::new(&mut self.get_mut().r), cx, buf)
+    }
+}
 
 impl<R: std::io::Write> std::io::Write for SshRead<R> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
@@ -76,46 +82,47 @@ impl<R: std::io::Write> std::io::Write for SshRead<R> {
     }
 }
 
-impl<R: AsyncWrite> AsyncWrite for SshRead<R> {
-    fn shutdown(&mut self) -> Poll<(), std::io::Error> {
-        self.r.shutdown()
+impl<R: AsyncWrite + Unpin> AsyncWrite for SshRead<R> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        AsyncWrite::poll_write(Pin::new(&mut self.r), cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), std::io::Error>> {
+        AsyncWrite::poll_flush(Pin::new(&mut self.r), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Result<(), std::io::Error>> {
+        AsyncWrite::poll_shutdown(Pin::new(&mut self.r), cx)
     }
 }
 
-
-impl<R: Tcp> Tcp for SshRead<R> {
-    fn tcp_shutdown(&mut self) -> Result<(), std::io::Error> {
-        self.r.tcp_shutdown()
-    }
-}
-
-
-
-impl<R: std::io::Read> SshRead<R> {
+impl<R: AsyncRead + Unpin> SshRead<R> {
     pub fn new(r: R) -> Self {
         SshRead {
             id: Some(ReadSshIdBuffer::new()),
-            r: r,
+            r,
         }
     }
 
-    pub fn read_ssh_id(&mut self) -> Poll<&[u8], Error> {
+    pub async fn read_ssh_id(&mut self) -> Result<&[u8], Error> {
         let ssh_id = self.id.as_mut().unwrap();
         loop {
             let mut i = 0;
             debug!("read_ssh_id: reading");
-            let n = match self.r.read(&mut ssh_id.buf[ssh_id.total..]) {
-                Ok(n) => n,
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => return Ok(Async::NotReady),
-                Err(e) => return Err(e.into())
-            };
+            let n = AsyncReadExt::read(&mut self.r, &mut ssh_id.buf[ssh_id.total..]).await?;
             debug!("read {:?}", n);
 
-            // let buf = try_nb!(stream.fill_buf());
             ssh_id.total += n;
             debug!("{:?}", std::str::from_utf8(&ssh_id.buf[..ssh_id.total]));
             if n == 0 {
-                return Err(Error::Disconnect);
+                return Err(Error::Disconnect.into());
             }
             loop {
                 if i >= ssh_id.total - 1 {
@@ -141,7 +148,7 @@ impl<R: std::io::Read> SshRead<R> {
                     if &ssh_id.buf[0..8] == b"SSH-2.0-" {
                         // Either the line starts with "SSH-2.0-"
                         ssh_id.sshid_len = i;
-                        return Ok(Async::Ready(&ssh_id.buf[..ssh_id.sshid_len]));
+                        return Ok(&ssh_id.buf[..ssh_id.sshid_len]);
                     }
                 }
                 // Else, it is a "preliminary" (see

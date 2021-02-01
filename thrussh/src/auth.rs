@@ -13,10 +13,11 @@
 // limitations under the License.
 //
 
-use thrussh_keys::encoding;
 use cryptovec::CryptoVec;
-use thrussh_keys::key;
 use std::sync::Arc;
+use thrussh_keys::encoding;
+use thrussh_keys::key;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 bitflags! {
     /// Set of methods, represented by bit flags.
@@ -39,16 +40,13 @@ bitflags! {
 }
 
 macro_rules! iter {
-    ( $y:expr, $x:expr ) => {
-        {
-            if $y.contains($x) {
-                $y.remove($x);
-                return Some($x)
-            }
+    ( $y:expr, $x:expr ) => {{
+        if $y.contains($x) {
+            $y.remove($x);
+            return Some($x);
         }
-    };
+    }};
 }
-
 
 impl Iterator for MethodSet {
     type Item = MethodSet;
@@ -62,6 +60,38 @@ impl Iterator for MethodSet {
     }
 }
 
+pub trait Signer: Sized {
+    type Error: From<crate::SendError>;
+    type Future: futures::Future<Output = (Self, Result<CryptoVec, Self::Error>)> + Send;
+
+    fn auth_publickey_sign(self, key: &key::PublicKey, to_sign: CryptoVec) -> Self::Future;
+}
+
+#[derive(Debug, Error)]
+pub enum AgentAuthError {
+    #[error(transparent)]
+    Send(#[from] crate::SendError),
+    #[error(transparent)]
+    Key(#[from] thrussh_keys::Error),
+}
+
+impl<R: AsyncRead + AsyncWrite + Unpin + Send + 'static> Signer
+    for thrussh_keys::agent::client::AgentClient<R>
+{
+    type Error = AgentAuthError;
+    type Future = std::pin::Pin<
+        Box<dyn futures::Future<Output = (Self, Result<CryptoVec, Self::Error>)> + Send>,
+    >;
+    fn auth_publickey_sign(self, key: &key::PublicKey, to_sign: CryptoVec) -> Self::Future {
+        let fut = self.sign_request(key, to_sign);
+        futures::FutureExt::boxed(async move {
+            let (a, b) = fut.await;
+            (a, b.map_err(AgentAuthError::Key))
+        })
+    }
+}
+
+#[derive(Debug)]
 pub enum Method {
     // None,
     Password { password: String },
@@ -113,5 +143,7 @@ pub enum CurrentRequest {
         algo: CryptoVec,
         sent_pk_ok: bool,
     },
-    KeyboardInteractive { submethods: String },
+    KeyboardInteractive {
+        submethods: String,
+    },
 }

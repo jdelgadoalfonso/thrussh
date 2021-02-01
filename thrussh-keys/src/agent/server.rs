@@ -1,26 +1,25 @@
+use crate::encoding::{Encoding, Position, Reader};
+use crate::key;
+use crate::key::SignatureHash;
+use byteorder::{BigEndian, ByteOrder};
+use cryptovec::CryptoVec;
+use futures::future::Future;
+use futures::stream::{Stream, StreamExt};
+use std;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use cryptovec::CryptoVec;
-use futures::{Future, Stream, Poll, Async};
-use tokio::io::{read_exact, ReadExact, flush, Flush, write_all, WriteAll};
-use tokio::io::{AsyncRead, AsyncWrite};
-use byteorder::{BigEndian, ByteOrder};
-use std::time::{Instant, Duration};
-use tokio::timer::Delay;
+use std::time::Duration;
 use std::time::SystemTime;
-use key::SignatureHash;
-use encoding::{Position, Reader, Encoding};
-use key;
 use tokio;
-use tokio::executor::{DefaultExecutor, Executor};
-use std;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::sleep;
 
-use Error;
 use super::msg;
 use super::Constraint;
+use crate::Error;
 
 #[derive(Clone)]
-struct KeyStore(Arc<RwLock<HashMap<Vec<u8>, (key::KeyPair, SystemTime, Vec<Constraint>)>>>);
+struct KeyStore(Arc<RwLock<HashMap<Vec<u8>, (Arc<key::KeyPair>, SystemTime, Vec<Constraint>)>>>);
 
 #[derive(Clone)]
 struct Lock(Arc<RwLock<CryptoVec>>);
@@ -29,204 +28,84 @@ struct Lock(Arc<RwLock<CryptoVec>>);
 #[derive(Debug)]
 pub enum ServerError<E> {
     E(E),
-    Error(Error)
+    Error(Error),
 }
 
-impl<E> std::convert::From<tokio::executor::SpawnError> for ServerError<E> {
-    fn from(e: tokio::executor::SpawnError) -> Self {
-        ServerError::Error(e.into())
-    }
-}
-
-pub trait Agent: Clone {
-    type F: Future<Item = bool, Error = Error> + From<bool>;
-    /// Called when data is about to be signed, and a confirmation is needed.
-    #[allow(unused_variables)]
-    fn confirm(&self, pk: &key::KeyPair) -> Self::F {
-        From::from(false)
+pub trait Agent: Clone + Send + 'static {
+    fn confirm(
+        self,
+        _pk: Arc<key::KeyPair>,
+    ) -> Box<dyn Future<Output = (Self, bool)> + Unpin + Send> {
+        Box::new(futures::future::ready((self, true)))
     }
 }
 
-#[derive(Clone)]
-pub struct F(pub bool);
-impl std::convert::From<bool> for F {
-    fn from(e: bool) -> Self {
-        F(e)
+pub async fn serve<S, L, A>(mut listener: L, agent: A) -> Result<(), Error>
+where
+    S: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
+    L: Stream<Item = tokio::io::Result<S>> + Unpin,
+    A: Agent + Send + Sync + 'static,
+{
+    let keys = KeyStore(Arc::new(RwLock::new(HashMap::new())));
+    let lock = Lock(Arc::new(RwLock::new(CryptoVec::new())));
+    while let Some(Ok(stream)) = listener.next().await {
+        let mut buf = CryptoVec::new();
+        buf.resize(4);
+        tokio::spawn(
+            (Connection {
+                lock: lock.clone(),
+                keys: keys.clone(),
+                agent: Some(agent.clone()),
+                s: stream,
+                buf: CryptoVec::new(),
+            })
+            .run(),
+        );
     }
+    Ok(())
 }
-impl Future for F {
-    type Item = bool;
-    type Error = Error;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        Ok(Async::Ready(self.0))
-    }
-}
+
 impl Agent for () {
-    type F = F;
-    fn confirm(&self, _: &key::KeyPair) -> Self::F {
-        F(true)
+    fn confirm(
+        self,
+        _: Arc<key::KeyPair>,
+    ) -> Box<dyn Future<Output = (Self, bool)> + Unpin + Send> {
+        Box::new(futures::future::ready((self, true)))
     }
 }
 
-/// The agent
-pub struct AgentServer<S: AsyncRead+AsyncWrite, E, L: Stream<Item = S, Error = E>, A: Agent> {
-    listener: L,
+struct Connection<S: AsyncRead + AsyncWrite + Send + 'static, A: Agent> {
     lock: Lock,
     keys: KeyStore,
-    agent: A,
+    agent: Option<A>,
+    s: S,
+    buf: CryptoVec,
 }
 
-impl<S: AsyncRead+AsyncWrite, E, L: Stream<Item = S, Error = E>, A: Agent> AgentServer<S, E, L, A> {
-
-    /// Create a new agent.
-    pub fn new(listener: L, agent: A) -> Self {
-        AgentServer {
-            listener,
-            agent,
-            lock: Lock(Arc::new(RwLock::new(CryptoVec::new()))),
-            keys: KeyStore(Arc::new(RwLock::new(HashMap::new()))),
-        }
-    }
-}
-
-impl<S: AsyncRead+AsyncWrite+Send+'static, E, L: Stream<Item = S, Error = E>, A: Agent+Send+'static> Future for AgentServer<S, E, L, A> {
-    type Item = ();
-    type Error = ServerError<E>;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static, A: Agent + Send + 'static>
+    Connection<S, A>
+{
+    async fn run(mut self) -> Result<(), Error> {
+        let mut writebuf = CryptoVec::new();
         loop {
-            match self.listener.poll() {
-                Ok(Async::Ready(Some(stream))) => {
-                    let mut buf = CryptoVec::new();
-                    buf.resize(4);
-                    DefaultExecutor::current().spawn(Box::new(Connection {
-                        lock: self.lock.clone(),
-                        keys: self.keys.clone(),
-                        state: Some(State::ReadLen(read_exact(stream, buf), CryptoVec::new())),
-                        agent: self.agent.clone(),
-                    }.map_err(|e| eprintln!("{:?}", e))))?
-                }
-                Ok(Async::Ready(None)) => return Ok(Async::Ready(())),
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
-                Err(e) => return Err(ServerError::E(e))
-            }
+            // Reading the length
+            self.buf.clear();
+            self.buf.resize(4);
+            self.s.read_exact(&mut self.buf).await?;
+            // Reading the rest of the buffer
+            let len = BigEndian::read_u32(&self.buf) as usize;
+            self.buf.clear();
+            self.buf.resize(len);
+            self.s.read_exact(&mut self.buf).await?;
+            // respond
+            writebuf.clear();
+            self.respond(&mut writebuf).await?;
+            self.s.write_all(&writebuf).await?;
+            self.s.flush().await?
         }
     }
-}
 
-struct Connection<S: AsyncRead+AsyncWrite, A: Agent> {
-    lock: Lock,
-    keys: KeyStore,
-    state: Option<State<S, A>>,
-    agent: A,
-}
-
-unsafe impl<S:AsyncRead+AsyncWrite+Send, A:Agent+Send> Send for Connection<S, A> {}
-unsafe impl<S:AsyncRead+AsyncWrite+Sync, A:Agent+Sync> Sync for Connection<S, A> {}
-
-enum State<S: AsyncRead+AsyncWrite, A: Agent> {
-    ReadLen(ReadExact<S, CryptoVec>, CryptoVec),
-    Read(ReadExact<S, CryptoVec>, CryptoVec),
-    Write(WriteAll<S, CryptoVec>, CryptoVec),
-    Respond { futures: Vec<A::F>, i: usize, stream: S, writebuf: CryptoVec, buf: CryptoVec },
-    Flush(Flush<S>, CryptoVec, CryptoVec)
-}
-
-impl<S: AsyncRead+AsyncWrite, A: Agent> Future for Connection<S, A> {
-    type Item = ();
-    type Error = Error;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        loop {
-            match self.state.take() {
-                Some(State::ReadLen(mut r, writebuf)) => {
-                    match r.poll() {
-                        Ok(Async::Ready((stream, mut buf))) => {
-                            let len = BigEndian::read_u32(&buf) as usize;
-                            buf.clear();
-                            buf.resize(len);
-                            self.state = Some(State::Read(read_exact(stream, buf), writebuf))
-                        }
-                        Ok(Async::NotReady) => {
-                            self.state = Some(State::ReadLen(r, writebuf));
-                            return Ok(Async::NotReady)
-                        }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                            return Ok(Async::Ready(()))
-                        }
-                        Err(e) => return Err(e.into())
-                    }
-                }
-                Some(State::Read(mut r, mut writebuf)) => {
-                    if let Async::Ready((stream, buf)) = r.poll()? {
-                        writebuf.clear();
-                        if let Some(v) = self.respond(&buf, &mut writebuf) {
-                            self.state = Some(State::Respond { futures: v, i: 0, stream, writebuf, buf })
-                        } else {
-                            self.state = Some(State::Write(write_all(stream, writebuf), buf))
-                        }
-                    } else {
-                        self.state = Some(State::Read(r, writebuf));
-                        return Ok(Async::NotReady)
-                    }
-                }
-                Some(State::Respond { mut futures, i, stream, mut writebuf, buf }) => {
-                    // Validate constraints and sign.
-                    if i >= futures.len() {
-                        // All constraints passed!
-                        {
-                            let mut r = buf.reader(0);
-                            r.read_byte()?;
-                            self.really_sign(r, &mut writebuf)?;
-                        }
-                        self.state = Some(State::Write(write_all(stream, writebuf), buf))
-                    } else {
-                        match futures[i].poll()? {
-                            Async::Ready(true) =>
-                                self.state = Some(State::Respond {
-                                    futures,
-                                    i: i + 1,
-                                    stream,
-                                    writebuf,
-                                    buf
-                                }),
-                            Async::Ready(false) => {
-                                // failure
-                                writebuf.resize(4);
-                                writebuf.push(msg::FAILURE);
-                                self.state = Some(State::Write(write_all(stream, writebuf), buf))
-                            }
-                            Async::NotReady => return Ok(Async::NotReady),
-                        }
-                    }
-                }
-                Some(State::Write(mut w, readbuf)) => {
-                    if let Async::Ready((stream, buf)) = w.poll()? {
-                        self.state = Some(State::Flush(flush(stream), readbuf, buf))
-                    } else {
-                        self.state = Some(State::Write(w, readbuf));
-                        return Ok(Async::NotReady)
-                    }
-                }
-                Some(State::Flush(mut w, mut readbuf, writebuf)) => {
-                    if let Async::Ready(stream) = w.poll()? {
-                        readbuf.clear();
-                        readbuf.resize(4);
-                        self.state = Some(State::ReadLen(read_exact(stream, readbuf), writebuf))
-                    } else {
-                        self.state = Some(State::Flush(w, readbuf, writebuf));
-                        return Ok(Async::NotReady)
-                    }
-                }
-                None => {
-                    panic!("future polled after completion")
-                }
-            }
-        }
-    }
-}
-
-impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
-
-    fn respond(&self, buf: &CryptoVec, w: &mut CryptoVec) -> Option<Vec<A::F>> {
+    async fn respond(&mut self, writebuf: &mut CryptoVec) -> Result<(), Error> {
         let is_locked = {
             if let Ok(password) = self.lock.0.read() {
                 !password.is_empty()
@@ -234,98 +113,101 @@ impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
                 true
             }
         };
-        w.extend(&[0, 0, 0, 0]);
-        let mut r = buf.reader(0);
+        writebuf.extend(&[0, 0, 0, 0]);
+        let mut r = self.buf.reader(0);
         match r.read_byte() {
             Ok(11) if !is_locked => {
                 // request identities
                 if let Ok(keys) = self.keys.0.read() {
-                    w.push(msg::IDENTITIES_ANSWER);
-                    w.push_u32_be(keys.len() as u32);
+                    writebuf.push(msg::IDENTITIES_ANSWER);
+                    writebuf.push_u32_be(keys.len() as u32);
                     for (k, _) in keys.iter() {
-                        w.extend_ssh_string(k);
-                        w.extend_ssh_string(b"");
+                        writebuf.extend_ssh_string(k);
+                        writebuf.extend_ssh_string(b"");
                     }
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(13) if !is_locked => {
                 // sign request
-                if let Ok(v) = self.try_sign(r) {
-                    return Some(v)
+                let agent = self.agent.take().unwrap();
+                let (agent, signed) = self.try_sign(agent, r, writebuf).await?;
+                self.agent = Some(agent);
+                if signed {
+                    return Ok(());
                 } else {
-                    w.resize(4);
-                    w.push(msg::FAILURE)
+                    writebuf.resize(4);
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(17) if !is_locked => {
                 // add identity
-                if let Ok(true) = self.add_key(buf, w, r, false) {
+                if let Ok(true) = self.add_key(r, false, writebuf).await {
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(18) if !is_locked => {
                 // remove identity
                 if let Ok(true) = self.remove_identity(r) {
-                    w.push(msg::SUCCESS)
+                    writebuf.push(msg::SUCCESS)
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(19) if !is_locked => {
                 // remove all identities
                 if let Ok(mut keys) = self.keys.0.write() {
                     keys.clear();
-                    w.push(msg::SUCCESS)
+                    writebuf.push(msg::SUCCESS)
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(22) if !is_locked => {
                 // lock
                 if let Ok(()) = self.lock(r) {
-                    w.push(msg::SUCCESS)
+                    writebuf.push(msg::SUCCESS)
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(23) if is_locked => {
                 // unlock
                 if let Ok(true) = self.unlock(r) {
-                    w.push(msg::SUCCESS)
+                    writebuf.push(msg::SUCCESS)
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             Ok(25) if !is_locked => {
                 // add identity constrained
-                if let Ok(true) = self.add_key(buf, w, r, true) {
+                if let Ok(true) = self.add_key(r, true, writebuf).await {
                 } else {
-                    w.push(msg::FAILURE)
+                    writebuf.push(msg::FAILURE)
                 }
             }
             _ => {
                 // Message not understood
-                w.push(msg::FAILURE)
+                writebuf.push(msg::FAILURE)
             }
         }
-        let len = w.len() - 4;
-        BigEndian::write_u32(&mut w[0..], len as u32);
-        None
+        let len = writebuf.len() - 4;
+        BigEndian::write_u32(&mut writebuf[0..], len as u32);
+        Ok(())
     }
 
     fn lock(&self, mut r: Position) -> Result<(), Error> {
         let password = r.read_string()?;
-        let mut lock = self.lock.0.write().map_err(|_| Error::Poison)?;
+        let mut lock = self.lock.0.write().unwrap();
         lock.extend(password);
         Ok(())
     }
 
     fn unlock(&self, mut r: Position) -> Result<bool, Error> {
         let password = r.read_string()?;
-        let mut lock = self.lock.0.write().map_err(|_| Error::Poison)?;
+        let mut lock = self.lock.0.write().unwrap();
         if &lock[0..] == password {
             lock.clear();
             Ok(true)
@@ -344,10 +226,14 @@ impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
         } else {
             Ok(false)
         }
-
     }
 
-    fn add_key(&self, buf: &CryptoVec, w: &mut CryptoVec, mut r: Position, constrained: bool) -> Result<bool, Error> {
+    async fn add_key<'a>(
+        &self,
+        mut r: Position<'a>,
+        constrained: bool,
+        writebuf: &mut CryptoVec,
+    ) -> Result<bool, Error> {
         let pos0 = r.position;
         let t = r.read_string()?;
         let (blob, key) = match t {
@@ -357,16 +243,15 @@ impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
                 let concat = r.read_string()?;
                 let _comment = r.read_string()?;
                 if &concat[32..64] != public_ {
-                    return Ok(false)
+                    return Ok(false);
                 }
                 use key::ed25519::*;
                 let mut public = PublicKey::new_zeroed();
                 let mut secret = SecretKey::new_zeroed();
                 public.key.clone_from_slice(&public_[..32]);
                 secret.key.clone_from_slice(&concat[..]);
-                w.push(msg::SUCCESS);
-                (buf[pos0..pos1].to_vec(),
-                 key::KeyPair::Ed25519(secret))
+                writebuf.push(msg::SUCCESS);
+                (self.buf[pos0..pos1].to_vec(), key::KeyPair::Ed25519(secret))
             }
             b"ssh-rsa" => {
                 use openssl::bn::{BigNum, BigNumContext};
@@ -389,7 +274,7 @@ impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
                     (dp, dq)
                 };
                 let _comment = r.read_string()?;
-                let key = Rsa::from_private_components (
+                let key = Rsa::from_private_components(
                     BigNum::from_slice(n)?,
                     BigNum::from_slice(e)?,
                     d,
@@ -400,16 +285,22 @@ impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
                     BigNum::from_slice(&q_inv)?,
                 )?;
 
-                let len0 = w.len();
-                w.extend_ssh_string(b"ssh-rsa");
-                w.extend_ssh_mpint(&e);
-                w.extend_ssh_mpint(&n);
-                let blob = w[len0..].to_vec();
-                w.resize(len0);
-                w.push(msg::SUCCESS);
-                (blob, key::KeyPair::RSA { key, hash: SignatureHash::SHA2_256 })
+                let len0 = writebuf.len();
+                writebuf.extend_ssh_string(b"ssh-rsa");
+                writebuf.extend_ssh_mpint(&e);
+                writebuf.extend_ssh_mpint(&n);
+                let blob = writebuf[len0..].to_vec();
+                writebuf.resize(len0);
+                writebuf.push(msg::SUCCESS);
+                (
+                    blob,
+                    key::KeyPair::RSA {
+                        key,
+                        hash: SignatureHash::SHA2_256,
+                    },
+                )
             }
-            _ => return Ok(false)
+            _ => return Ok(false),
         };
         let mut w = self.keys.0.write().unwrap();
         let now = SystemTime::now();
@@ -423,61 +314,65 @@ impl<S: AsyncRead+AsyncWrite, A: Agent> Connection<S, A> {
                     c.push(Constraint::KeyLifetime { seconds });
                     let blob = blob.clone();
                     let keys = self.keys.clone();
-                    tokio::executor::DefaultExecutor::current().spawn(Box::new(
-                        Delay::new(Instant::now() + Duration::from_secs(seconds as u64))
-                            .map(move |_| {
-                                let mut keys = keys.0.write().unwrap();
-                                let delete = if let Some(&(_, time, _)) = keys.get(&blob) {
-                                    time == now
-                                } else {
-                                    false
-                                };
-                                if delete {
-                                    keys.remove(&blob);
-                                }
-                            })
-                            .map_err(|_| ())
-                    ))?
+                    tokio::spawn(async move {
+                        sleep(Duration::from_secs(seconds as u64)).await;
+                        let mut keys = keys.0.write().unwrap();
+                        let delete = if let Some(&(_, time, _)) = keys.get(&blob) {
+                            time == now
+                        } else {
+                            false
+                        };
+                        if delete {
+                            keys.remove(&blob);
+                        }
+                    });
                 } else if t == msg::CONSTRAIN_CONFIRM {
                     c.push(Constraint::Confirm)
                 } else {
-                    return Ok(false)
+                    return Ok(false);
                 }
             }
-            w.insert(blob, (key, now, Vec::new()));
+            w.insert(blob, (Arc::new(key), now, Vec::new()));
         } else {
-            w.insert(blob, (key, now, Vec::new()));
+            w.insert(blob, (Arc::new(key), now, Vec::new()));
         }
         Ok(true)
     }
 
-    fn try_sign(&self, mut r: Position) -> Result<Vec<A::F>, Error> {
-        let blob = r.read_string()?;
-        let k = self.keys.0.read().unwrap();
-        if let Some(&(ref key, _, ref constraints)) = k.get(blob) {
-            let mut v = Vec::new();
-            for cons in constraints {
-                match *cons {
-                    Constraint::KeyLifetime { .. } | Constraint::Extensions { .. } => {}
-                    Constraint::Confirm => v.push(self.agent.confirm(key))
+    async fn try_sign<'a>(
+        &self,
+        agent: A,
+        mut r: Position<'a>,
+        writebuf: &mut CryptoVec,
+    ) -> Result<(A, bool), Error> {
+        let mut needs_confirm = false;
+        let key = {
+            let blob = r.read_string()?;
+            let k = self.keys.0.read().unwrap();
+            if let Some(&(ref key, _, ref constraints)) = k.get(blob) {
+                if constraints.iter().any(|c| *c == Constraint::Confirm) {
+                    needs_confirm = true;
                 }
+                key.clone()
+            } else {
+                return Ok((agent, false));
             }
-            Ok(v)
+        };
+        let agent = if needs_confirm {
+            let (agent, ok) = agent.confirm(key.clone()).await;
+            if !ok {
+                return Ok((agent, false));
+            }
+            agent
         } else {
-            Ok(vec![A::F::from(false)])
-        }
-    }
-
-    fn really_sign(&self, mut r: Position, w: &mut CryptoVec) -> Result<(), Error> {
-        let blob = r.read_string()?;
+            agent
+        };
+        writebuf.push(msg::SIGN_RESPONSE);
         let data = r.read_string()?;
-        let k = self.keys.0.read().unwrap();
-        if let Some(&(ref key, _, _)) = k.get(blob) {
-            w.push(msg::SIGN_RESPONSE);
-            key.add_signature(w, data)?;
-            let len = w.len();
-            BigEndian::write_u32(&mut w[0..], (len-4) as u32);
-        }
-        Ok(())
+        key.add_signature(writebuf, data)?;
+        let len = writebuf.len();
+        BigEndian::write_u32(writebuf, (len - 4) as u32);
+
+        Ok((agent, true))
     }
 }

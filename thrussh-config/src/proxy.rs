@@ -1,123 +1,83 @@
+use futures::ready;
+use futures::task::*;
 use std;
-use tokio;
-use futures::{Poll, Async, Future};
-use tokio::net::tcp::TcpStream;
 use std::net::SocketAddr;
-use std::process::{Stdio, Command};
-use thrussh;
-use std::io::Write;
+use std::pin::Pin;
+use std::process::Stdio;
+use tokio;
+use tokio::io::ReadBuf;
+use tokio::net::TcpStream;
+use tokio::process::Command;
 
 /// A type to implement either a TCP socket, or proxying through an external command.
 pub enum Stream {
     #[allow(missing_docs)]
-    Child(std::process::Child),
+    Child(tokio::process::Child),
     #[allow(missing_docs)]
-    Tcp(TcpStream)
-}
-
-pub struct ConnectFuture(Option<ConnectFuture_>);
-enum ConnectFuture_ {
-    Tcp(tokio::net::tcp::ConnectFuture),
-    Child(std::process::Child),
-}
-
-impl Future for ConnectFuture {
-    type Item = Stream;
-    type Error = tokio::io::Error;
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match self.0.take().unwrap() {
-            ConnectFuture_::Tcp(mut tcp) => {
-                match tcp.poll()? {
-                    Async::Ready(tcp) => Ok(Async::Ready(Stream::Tcp(tcp))),
-                    Async::NotReady => {
-                        self.0 = Some(ConnectFuture_::Tcp(tcp));
-                        Ok(Async::NotReady)
-                    }
-                }
-            },
-            ConnectFuture_::Child(child) => Ok(Async::Ready(Stream::Child(child)))
-        }
-    }
+    Tcp(TcpStream),
 }
 
 impl Stream {
     /// Connect a direct TCP stream (as opposed to a proxied one).
-    pub fn tcp_connect(addr: &SocketAddr) -> ConnectFuture {
-        ConnectFuture(Some(ConnectFuture_::Tcp(tokio::net::tcp::TcpStream::connect(addr))))
+    pub async fn tcp_connect(addr: &SocketAddr) -> Result<Stream, std::io::Error> {
+        Ok(Stream::Tcp(tokio::net::TcpStream::connect(addr).await?))
     }
     /// Connect through a proxy command.
-    pub fn proxy_command(cmd: &str, args: &[&str]) -> ConnectFuture {
-        ConnectFuture(Some(ConnectFuture_::Child(
+    pub async fn proxy_command(cmd: &str, args: &[&str]) -> Result<Stream, std::io::Error> {
+        Ok(Stream::Child(
             Command::new(cmd)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .args(args)
-                .spawn().unwrap()
-        )))
+                .spawn()
+                .unwrap(),
+        ))
     }
 }
 
-impl tokio::io::Read for Stream {
-    fn read(&mut self, r: &mut [u8]) -> std::io::Result<usize> {
+impl tokio::io::AsyncRead for Stream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &mut ReadBuf,
+    ) -> Poll<Result<(), std::io::Error>> {
         match *self {
-            Stream::Child(ref mut c) => c.stdout.as_mut().unwrap().read(r),
-            Stream::Tcp(ref mut t) => t.read(r)
+            Stream::Child(ref mut c) => Pin::new(c.stdout.as_mut().unwrap()).poll_read(cx, buf),
+            Stream::Tcp(ref mut t) => Pin::new(t).poll_read(cx, buf),
         }
     }
 }
 
 impl tokio::io::AsyncWrite for Stream {
-    fn shutdown(&mut self) -> Result<Async<()>, std::io::Error> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        match *self {
+            Stream::Child(ref mut c) => Pin::new(c.stdin.as_mut().unwrap()).poll_write(cx, buf),
+            Stream::Tcp(ref mut t) => Pin::new(t).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), std::io::Error>> {
+        match *self {
+            Stream::Child(ref mut c) => Pin::new(c.stdin.as_mut().unwrap()).poll_flush(cx),
+            Stream::Tcp(ref mut t) => Pin::new(t).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Result<(), std::io::Error>> {
         match *self {
             Stream::Child(ref mut c) => {
-                c.stdin.take();
-                Ok(Async::Ready(()))
-            },
-            Stream::Tcp(ref mut t) => t.shutdown()
+                ready!(Pin::new(c.stdin.as_mut().unwrap()).poll_shutdown(cx))?;
+                drop(c.stdin.take());
+                Poll::Ready(Ok(()))
+            }
+            Stream::Tcp(ref mut t) => Pin::new(t).poll_shutdown(cx),
         }
     }
-    fn poll_write(&mut self, r: &[u8]) -> Result<Async<usize>, std::io::Error> {
-        match *self {
-            Stream::Child(ref mut c) => {
-                match c.stdin.as_mut().unwrap().write(r) {
-                    Ok(n) => Ok(Async::Ready(n)),
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Async::NotReady),
-                    Err(e) => Err(e)
-                }
-            },
-            Stream::Tcp(ref mut t) => t.poll_write(r)
-        }
-    }
-    fn poll_flush(&mut self) -> Result<Async<()>, std::io::Error> {
-        match *self {
-            Stream::Child(ref mut c) => {
-                match c.stdin.as_mut().unwrap().flush() {
-                    Ok(n) => Ok(Async::Ready(n)),
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Async::NotReady),
-                    Err(e) => Err(e)
-                }
-            },
-            Stream::Tcp(ref mut t) => t.poll_flush()
-        }
-    }
-}
-
-impl std::io::Write for Stream {
-    fn write(&mut self, r: &[u8]) -> std::io::Result<usize> {
-        match *self {
-            Stream::Child(ref mut c) => c.stdin.as_mut().unwrap().write(r),
-            Stream::Tcp(ref mut t) => t.write(r)
-        }
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        match *self {
-            Stream::Child(ref mut c) => c.stdin.as_mut().unwrap().flush(),
-            Stream::Tcp(ref mut t) => t.flush()
-        }
-    }
-}
-
-impl tokio::io::AsyncRead for Stream{}
-impl thrussh::Tcp for Stream {
-
 }

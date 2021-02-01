@@ -15,15 +15,12 @@
 
 use super::*;
 use std::num::Wrapping;
-use tokio::io::{WriteAll, write_all};
-use tokio::io::AsyncWrite;
 
 #[derive(Debug)]
 pub struct SSHBuffer {
     pub buffer: CryptoVec,
     pub len: usize, // next packet length.
     pub bytes: usize,
-
     // Sequence numbers are on 32 bits and wrap.
     // https://tools.ietf.org/html/rfc4253#section-6.4
     pub seqn: Wrapping<u32>,
@@ -43,13 +40,5 @@ impl SSHBuffer {
         self.buffer.extend(id);
         self.buffer.push(b'\r');
         self.buffer.push(b'\n');
-    }
-
-    pub fn write_all<W: AsyncWrite>(&mut self, stream: W) -> WriteAll<W, CryptoVec> {
-        debug!("write_all: {:?}", self.buffer.as_ref());
-        write_all(
-            stream,
-            std::mem::replace(&mut self.buffer, CryptoVec::new()),
-        )
     }
 }

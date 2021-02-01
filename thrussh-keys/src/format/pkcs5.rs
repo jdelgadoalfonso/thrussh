@@ -1,9 +1,9 @@
-use Error;
-use key;
-use super::{Encryption, pkcs_unpad, decode_rsa};
+use super::{decode_rsa, pkcs_unpad, Encryption};
+use crate::key;
+use crate::Error;
 
+use openssl::hash::{Hasher, MessageDigest};
 use openssl::symm::{decrypt, Cipher};
-use openssl::hash::{MessageDigest, Hasher};
 
 /// Decode a secret key in the PKCS#5 format, possible deciphering it
 /// using the supplied password.
@@ -19,12 +19,7 @@ pub fn decode_pkcs5(
                 h.update(pass).unwrap();
                 h.update(&iv[..8]).unwrap();
                 let md5 = h.finish().unwrap();
-                let mut dec = decrypt(
-                    Cipher::aes_128_cbc(),
-                    &md5,
-                    Some(&iv[..]),
-                    secret
-                )?;
+                let mut dec = decrypt(Cipher::aes_128_cbc(), &md5, Some(&iv[..]), secret)?;
                 pkcs_unpad(&mut dec);
                 dec
             }
@@ -32,7 +27,6 @@ pub fn decode_pkcs5(
         };
         decode_rsa(&sec)
     } else {
-        Err(Error::KeyIsEncrypted)
+        Err(Error::KeyIsEncrypted.into())
     }
 }
-

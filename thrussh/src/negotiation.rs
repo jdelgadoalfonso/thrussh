@@ -12,25 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use Error;
-use thrussh_keys::key;
-use kex;
-use cipher;
-use msg;
+use crate::{cipher, kex, msg, Error};
 use std::str::from_utf8;
-use mac; // unimplemented
-// use super::compression; // unimplemented
+use thrussh_keys::key;
+// use super::mac; // unimplemented
+use crate::compression::*;
+use crate::mac;
 use cryptovec::CryptoVec;
-use thrussh_keys::encoding::{Encoding, Reader};
-use thrussh_keys::key::{PublicKey, KeyPair};
 use openssl::rand;
+use thrussh_keys::encoding::{Encoding, Reader};
+use thrussh_keys::key::{KeyPair, PublicKey};
 
 #[derive(Debug)]
 pub struct Names {
     pub kex: kex::Name,
     pub key: key::Name,
     pub cipher: cipher::Name,
-    pub mac: mac::Name,
+    pub mac: Option<mac::Name>,
+    pub server_compression: Compression,
+    pub client_compression: Compression,
     pub ignore_guessed: bool,
 }
 
@@ -49,17 +49,27 @@ pub struct Preferred {
     pub compression: &'static [&'static str],
 }
 
-pub const DEFAULT: Preferred = Preferred {
-    kex: &[kex::CURVE25519],
-    key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA],
-    cipher: &[cipher::chacha20poly1305::NAME, cipher::aes128ctr::NAME],
-    mac: &[mac::HMAC_SHA2_256::NAME],
-    compression: &["none"],
-};
+impl Preferred {
+    pub const DEFAULT: Preferred = Preferred {
+        kex: &[kex::CURVE25519],
+        key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA],
+        cipher: &[cipher::chacha20poly1305::NAME, cipher::aes128ctr::NAME],
+        mac: &[mac::NONE::NAME, mac::HMAC_SHA2_256::NAME],
+        compression: &["none", "zlib", "zlib@openssh.com"],
+    };
+
+    pub const COMPRESSED: Preferred = Preferred {
+        kex: &[kex::CURVE25519],
+        key: &[key::ED25519, key::RSA_SHA2_256, key::RSA_SHA2_512, key::SSH_RSA],
+        cipher: &[cipher::chacha20poly1305::NAME],
+        mac: &[mac::NONE::NAME, mac::HMAC_SHA2_256::NAME],
+        compression: &["zlib", "zlib@openssh.com", "none"],
+    };
+}
 
 impl Default for Preferred {
     fn default() -> Preferred {
-        DEFAULT
+        Preferred::DEFAULT
     }
 }
 
@@ -109,7 +119,7 @@ pub trait Select {
                 from_utf8(kex_string),
                 pref.kex
             );
-            return Err(Error::NoCommonKexAlgo);
+            return Err(Error::NoCommonKexAlgo.into());
         };
 
         let key_string = r.read_string()?;
@@ -121,7 +131,7 @@ pub trait Select {
                 from_utf8(key_string),
                 pref.key
             );
-            return Err(Error::NoCommonKeyAlgo);
+            return Err(Error::NoCommonKeyAlgo.into());
         };
 
         let cipher_string = r.read_string()?;
@@ -132,38 +142,49 @@ pub trait Select {
                 from_utf8(cipher_string),
                 pref.cipher
             );
-            return Err(Error::NoCommonCipher);
+            return Err(Error::NoCommonCipher.into());
         }
-        r.read_string()?; // SERVER_TO_CLIENT
-        r.read_string()?;
-        let hmac_string = r.read_string()?; // SERVER_TO_CLIENT
-        let hmac = Self::select(pref.mac, hmac_string);
-        let hmac = hmac.and_then(|(_, x)| Some(x));
-        if hmac.is_none() {
-            debug!(
-                "Could not find common hmac, other side only supports {:?}, we only support {:?}",
-                from_utf8(hmac_string),
-                pref.mac
-            );
-            return Err(Error::NoCommonHmac);
-        }
-        r.read_string()?; //
-        r.read_string()?; //
-        r.read_string()?; //
+        r.read_string()?; // cipher server-to-client.
+        debug!("kex {}", line!());
+        let mac = Self::select(pref.mac, r.read_string()?);
+        let mac = mac.and_then(|(_, x)| Some(x));
+        r.read_string()?; // mac server-to-client.
+
+        debug!("kex {}", line!());
+        // client-to-server compression.
+        let client_compression =
+            if let Some((_, c)) = Self::select(pref.compression, r.read_string()?) {
+                Compression::from_string(c)
+            } else {
+                return Err(Error::NoCommonCompression.into());
+            };
+        debug!("kex {}", line!());
+        // server-to-client compression.
+        let server_compression =
+            if let Some((_, c)) = Self::select(pref.compression, r.read_string()?) {
+                Compression::from_string(c)
+            } else {
+                return Err(Error::NoCommonCompression.into());
+            };
+        debug!("client_compression = {:?}", client_compression);
+        r.read_string()?; // languages client-to-server
+        r.read_string()?; // languages server-to-client
 
         let follows = r.read_byte()? != 0;
-        match (cipher, hmac, follows) {
-            (Some((_, cip)), Some(mac), fol) => {
+        match (cipher, mac, follows) {
+            (Some((_, cipher)), mac, fol) => {
                 Ok(Names {
                     kex: kex_algorithm,
                     key: key_algorithm,
-                    cipher: cip,
-                    mac: mac,
+                    cipher,
+                    mac,
+                    client_compression,
+                    server_compression,
                     // Ignore the next packet if (1) it follows and (2) it's not the correct guess.
                     ignore_guessed: fol && !(kex_both_first && key_both_first),
                 })
             }
-            _ => Err(Error::KexInit),
+            _ => Err(Error::KexInit.into()),
         }
     }
 }
@@ -201,9 +222,7 @@ impl Select for Client {
     }
 }
 
-
 pub fn write_kex(prefs: &Preferred, buf: &mut CryptoVec) -> Result<(), Error> {
-
     // buf.clear();
     buf.push(msg::KEXINIT);
 

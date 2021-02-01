@@ -1,10 +1,10 @@
 [workspace]
 
-members = [ "thrussh-keys", "thrussh", "thrussh-libsodium", "thrussh-agent", "thrussh-config" ]
+members = [ "thrussh-keys", "thrussh", "thrussh-libsodium", "thrussh-config", "cryptovec" ]
 
-[replace]
-
-"thrussh:0.21.5" = { path = "thrussh" }
-"thrussh-keys:0.11.9" = { path = "thrussh-keys" }
-"thrussh-config:0.2.0" = { path = "thrussh-config" }
-"thrussh-libsodium:0.1.4" = { path = "thrussh-libsodium" }
+[patch.crates-io]
+thrussh = { path = "thrussh" }
+thrussh-keys = { path = "thrussh-keys" }
+thrussh-libsodium = { path = "thrussh-libsodium" }
+cryptovec = { path = "cryptovec" }
+thrussh-config = { path = "thrussh-config" }

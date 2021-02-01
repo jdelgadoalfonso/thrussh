@@ -1,92 +1,86 @@
-extern crate tokio;
-extern crate futures;
-extern crate thrussh;
-extern crate regex;
-#[macro_use]
-extern crate log;
-extern crate dirs;
-
+use log::debug;
 use std::io::Read;
+use std::net::ToSocketAddrs;
 use std::path::Path;
+use thiserror::*;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+/// anyhow::Errors.
 pub enum Error {
-    IO(std::io::Error),
+    #[error("Host not found")]
     HostNotFound,
-    NoHome
-}
-
-impl std::convert::From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::IO(e)
-    }
-}
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match *self {
-            Error::IO(ref e) => e.fmt(f),
-            Error::HostNotFound => write!(f, "Host not found"),
-            Error::NoHome => write!(f, "No home directory"),
-        }
-    }
-}
-impl std::error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::IO(ref e) => e.description(),
-            Error::HostNotFound => "Host not found",
-            Error::NoHome => "No home directory",
-        }
-    }
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        if let Error::IO(ref e) = *self {
-            Some(e)
-        } else {
-            None
-        }
-    }
+    #[error("No home directory")]
+    NoHome,
+    #[error("{}", source)]
+    Io {
+        #[from]
+        source: std::io::Error,
+    },
 }
 
 mod proxy;
 pub use proxy::*;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Config {
-    pub user: Option<String>,
-    pub host_name: Option<String>,
-    pub port: Option<u16>,
+    pub user: String,
+    pub host_name: String,
+    pub port: u16,
     pub identity_file: Option<String>,
     pub proxy_command: Option<String>,
     pub add_keys_to_agent: AddKeysToAgent,
 }
 
 impl Config {
-    pub fn update_proxy_command(&mut self) {
-        if let Some(ref h) = self.host_name {
-            if let Some(ref mut prox) = self.proxy_command {
-                *prox = prox.replace("%h", h);
-            }
+    pub fn default(host_name: &str) -> Self {
+        Config {
+            user: whoami::username(),
+            host_name: host_name.to_string(),
+            port: 22,
+            identity_file: None,
+            proxy_command: None,
+            add_keys_to_agent: AddKeysToAgent::default(),
         }
-        if let Some(ref p) = self.port {
-            if let Some(ref mut prox) = self.proxy_command {
-                *prox = prox.replace("%p", &format!("{}", p));
-            }
+    }
+}
+
+impl Config {
+    fn update_proxy_command(&mut self) {
+        if let Some(ref mut prox) = self.proxy_command {
+            *prox = prox.replace("%h", &self.host_name);
+            *prox = prox.replace("%p", &format!("{}", self.port));
+        }
+    }
+
+    pub async fn stream(&mut self) -> Result<Stream, std::io::Error> {
+        self.update_proxy_command();
+        if let Some(ref proxy_command) = self.proxy_command {
+            let cmd: Vec<&str> = proxy_command.split(' ').collect();
+            Stream::proxy_command(cmd[0], &cmd[1..]).await
+        } else {
+            Stream::tcp_connect(
+                &(self.host_name.as_str(), self.port)
+                    .to_socket_addrs()?
+                    .next()
+                    .unwrap(),
+            )
+            .await
         }
     }
 }
 
 pub fn parse_home(host: &str) -> Result<Config, Error> {
-    let mut home = if let Some(home) = dirs::home_dir() {
+    let mut home = if let Some(home) = dirs_next::home_dir() {
         home
     } else {
-        return Err(Error::NoHome)
+        return Err(Error::NoHome);
     };
     home.push(".ssh");
     home.push("config");
     parse_path(&home, host)
 }
 
-pub fn parse_path<P:AsRef<Path>>(path: P, host: &str) -> Result<Config, Error> {
+pub fn parse_path<P: AsRef<Path>>(path: P, host: &str) -> Result<Config, Error> {
     let mut s = String::new();
     let mut b = std::fs::File::open(path)?;
     b.read_to_string(&mut s)?;
@@ -98,7 +92,7 @@ pub enum AddKeysToAgent {
     Yes,
     Confirm,
     Ask,
-    No
+    No,
 }
 
 impl Default for AddKeysToAgent {
@@ -117,18 +111,38 @@ pub fn parse(file: &str, host: &str) -> Result<Config, Error> {
             if let Some(ref mut config) = config {
                 match lower.as_str() {
                     "host" => break,
-                    "user" => config.user = Some(value.trim_start().to_string()),
-                    "hostname" => config.host_name = Some(value.trim_start().to_string()),
-                    "port" => config.port = value.trim_start().parse().ok(),
-                    "identityfile" => config.identity_file = Some(value.trim_start().to_string()),
-                    "proxycommand" => config.proxy_command = Some(value.trim_start().to_string()),
-                    "addkeystoagent" => {
-                        match value.to_lowercase().as_str() {
-                            "yes" => config.add_keys_to_agent = AddKeysToAgent::Yes,
-                            "confirm" => config.add_keys_to_agent = AddKeysToAgent::Confirm,
-                            "ask" => config.add_keys_to_agent = AddKeysToAgent::Ask,
-                            _ => config.add_keys_to_agent = AddKeysToAgent::No,
+                    "user" => {
+                        config.user.clear();
+                        config.user.push_str(value.trim_start());
+                    }
+                    "hostname" => {
+                        config.host_name.clear();
+                        config.host_name.push_str(value.trim_start())
+                    }
+                    "port" => {
+                        if let Ok(port) = value.trim_start().parse() {
+                            config.port = port
                         }
+                    }
+                    "identityfile" => {
+                        let id = value.trim_start();
+                        if id.starts_with("~/") {
+                            if let Some(mut home) = dirs_next::home_dir() {
+                                home.push(id.split_at(2).1);
+                                config.identity_file = Some(home.to_str().unwrap().to_string());
+                            } else {
+                                return Err(Error::NoHome);
+                            }
+                        } else {
+                            config.identity_file = Some(id.to_string())
+                        }
+                    }
+                    "proxycommand" => config.proxy_command = Some(value.trim_start().to_string()),
+                    "addkeystoagent" => match value.to_lowercase().as_str() {
+                        "yes" => config.add_keys_to_agent = AddKeysToAgent::Yes,
+                        "confirm" => config.add_keys_to_agent = AddKeysToAgent::Confirm,
+                        "ask" => config.add_keys_to_agent = AddKeysToAgent::Ask,
+                        _ => config.add_keys_to_agent = AddKeysToAgent::No,
                     },
                     key => {
                         debug!("{:?}", key);
@@ -138,14 +152,15 @@ pub fn parse(file: &str, host: &str) -> Result<Config, Error> {
                 match lower.as_str() {
                     "host" => {
                         if value.trim_start() == host {
-                            config = Some(Config::default())
+                            let mut c = Config::default(host);
+                            c.port = 22;
+                            config = Some(c)
                         }
                     }
                     _ => {}
                 }
             }
         }
-
     }
     if let Some(config) = config {
         Ok(config)

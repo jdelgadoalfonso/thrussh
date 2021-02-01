@@ -12,925 +12,144 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-use std;
-use byteorder::{ByteOrder, BigEndian};
 use super::super::*;
 use super::*;
-use msg;
-use thrussh_keys::encoding::{Encoding, Reader};
-use thrussh_keys::key;
 use auth::*;
-use thrussh_keys::key::Verify;
+use byteorder::{BigEndian, ByteOrder};
+use msg;
 use negotiation;
 use negotiation::Select;
-use futures::{Async, Future};
-use futures;
-use futures::Poll;
+use std::cell::RefCell;
+use thrussh_keys::encoding::{Encoding, Position, Reader};
+use thrussh_keys::key;
+use thrussh_keys::key::Verify;
+use tokio::time::Instant;
 
 impl Session {
     /// Returns false iff a request was rejected.
-    pub(in server) fn server_read_encrypted<H: Handler>(
+    pub(in crate) async fn server_read_encrypted<H: Handler>(
         mut self,
-        handler: H,
+        handler: &mut Option<H>,
         buf: &[u8],
-    ) -> Result<PendingFuture<H>, HandlerError<H::Error>> {
-
+    ) -> Result<Self, H::Error> {
+        let instant = tokio::time::Instant::now() + self.common.config.auth_rejection_time;
         debug!("read_encrypted");
         // Either this packet is a KEXINIT, in which case we start a key re-exchange.
 
-        let mut enc = self.common.encrypted.take().unwrap();
+        let mut enc = self.common.encrypted.as_mut().unwrap();
         if buf[0] == msg::KEXINIT {
-            // If we're not currently rekeying, but buf is a rekey request
-            if let Some(exchange) = enc.exchange.take() {
+            debug!("Received rekeying request");
+            // If we're not currently rekeying, but `buf` is a rekey request
+            if let Some(Kex::KexInit(kexinit)) = enc.rekey.take() {
+                enc.rekey = Some(kexinit.server_parse(
+                    self.common.config.as_ref(),
+                    &mut self.common.cipher.lock().unwrap(),
+                    &self.common.mac.lock().unwrap(),
+                    buf,
+                    &mut self.common.write_buffer,
+                )?);
+                self.flush()?;
+            } else if let Some(exchange) = enc.exchange.take() {
                 let kexinit = KexInit::received_rekey(
                     exchange,
-                    negotiation::Server::read_kex(
-                        buf,
-                        &self.common.config.as_ref().preferred,
-                    )?,
+                    negotiation::Server::read_kex(buf, &self.common.config.as_ref().preferred)?,
                     &enc.session_id,
                 );
-                self.common.kex = Some(kexinit.server_parse(
+                enc.rekey = Some(kexinit.server_parse(
                     self.common.config.as_ref(),
-                    &mut (self.common.cipher.lock().unwrap()),
-                    &self.common.mac,
+                    &mut self.common.cipher.lock().unwrap(),
+                    &self.common.mac.lock().unwrap(),
                     buf,
                     &mut self.common.write_buffer,
                 )?);
             }
-            self.common.encrypted = Some(enc);
-            return Ok(PendingFuture::Ok {
-                handler: handler,
-                session: self,
-            });
+            return Ok(self);
         }
-        // If we've successfully read a packet.
-        // debug!("state = {:?}, buf = {:?}", self.0.state, buf);
-        let mut is_authenticated = false;
-        let state = enc.state.take();
-        debug!(
-            "state = {:?} {:?} {:?}",
-            state,
-            buf[0],
-            msg::SERVICE_REQUEST
-        );
-        match state {
-            Some(EncryptedState::WaitingServiceRequest) if buf[0] == msg::SERVICE_REQUEST => {
 
+        match enc.rekey.take() {
+            Some(Kex::KexDh(kexdh)) => {
+                enc.rekey = Some(kexdh.parse(
+                    self.common.config.as_ref(),
+                    &mut self.common.cipher.lock().unwrap(),
+                    &self.common.mac.lock().unwrap(),
+                    buf,
+                    &mut self.common.write_buffer,
+                )?);
+                return Ok(self);
+            }
+            Some(Kex::NewKeys(newkeys)) => {
+                if buf[0] != msg::NEWKEYS {
+                    return Err(Error::Kex.into());
+                }
+                // Ok, NEWKEYS received, now encrypted.
+                self.common.newkeys(newkeys);
+                return Ok(self);
+            }
+            rek => enc.rekey = rek,
+        }
+
+        // If we've successfully read a packet.
+        match enc.state {
+            EncryptedState::WaitingServiceRequest {
+                ref mut accepted, ..
+            } if buf[0] == msg::SERVICE_REQUEST => {
                 let mut r = buf.reader(1);
-                let request = r.read_string()?;
+                let request = r.read_string().map_err(crate::Error::from)?;
                 debug!("request: {:?}", std::str::from_utf8(request));
                 if request == b"ssh-userauth" {
-
                     let auth_request = server_accept_service(
                         self.common.config.as_ref().auth_banner,
                         self.common.config.as_ref().methods,
                         &mut enc.write,
                     );
-                    enc.state = Some(EncryptedState::WaitingAuthRequest(auth_request));
-
-                } else {
-
-                    enc.state = Some(EncryptedState::WaitingServiceRequest)
+                    *accepted = true;
+                    enc.state = EncryptedState::WaitingAuthRequest(auth_request);
                 }
+                Ok(self)
             }
-            Some(EncryptedState::WaitingAuthRequest(auth_request)) => {
-                if buf[0] == msg::USERAUTH_REQUEST {
-                    let auth_request = enc.server_read_auth_request(
-                        handler,
-                        buf,
-                        &mut self.common.auth_user,
-                        auth_request,
-                    )?;
-                    self.common.encrypted = Some(enc);
-                    return Ok(PendingFuture::ReadAuthRequest {
-                        session: self,
-                        auth_request: auth_request,
-                    });
-                } else if buf[0] == msg::USERAUTH_INFO_RESPONSE {
-                    let auth_request = enc.read_userauth_info_response(
-                        handler,
-                        &mut self.common.auth_user,
-                        auth_request,
-                        buf,
-                    )?;
-                    self.common.encrypted = Some(enc);
-                    return Ok(PendingFuture::ReadAuthRequest {
-                        session: self,
-                        auth_request: auth_request,
-                    });
-                } else {
-                    // Wrong request
-                    enc.state = Some(EncryptedState::WaitingAuthRequest(auth_request));
+            EncryptedState::WaitingAuthRequest(_) if buf[0] == msg::USERAUTH_REQUEST => {
+                enc.server_read_auth_request(instant, handler, buf, &mut self.common.auth_user)
+                    .await?;
+                if let EncryptedState::InitCompression = enc.state {
+                    enc.client_compression.init_decompress(&mut enc.decompress);
                 }
+                Ok(self)
             }
-            Some(EncryptedState::Authenticated) => {
-                is_authenticated = true;
-                enc.state = Some(EncryptedState::Authenticated)
-            }
-            state => {
-                enc.state = state;
-            }
-        }
-        self.common.encrypted = Some(enc);
-        if is_authenticated {
-            let auth = self.server_read_authenticated(handler, buf).unwrap();
-            Ok(PendingFuture::Authenticated(auth))
-        } else {
-            Ok(PendingFuture::Ok {
-                handler: handler,
-                session: self,
-            })
-        }
-    }
-
-    fn server_read_authenticated<H: Handler>(
-        mut self,
-        handler: H,
-        buf: &[u8],
-    ) -> Result<Authenticated<H>, HandlerError<H::Error>> {
-        debug!(
-            "authenticated buf = {:?}",
-            &buf[..std::cmp::min(buf.len(), 100)]
-        );
-        match buf[0] {
-            msg::CHANNEL_OPEN => {
-                Ok(Authenticated::FutureUnit(
-                    self.server_handle_channel_open(handler, buf)?,
-                ))
-            }
-            msg::CHANNEL_CLOSE => {
-                let mut r = buf.reader(1);
-                let channel_num = ChannelId(r.read_u32()?);
-                if let Some(ref mut enc) = self.common.encrypted {
-                    enc.channels.remove(&channel_num);
-                }
-                debug!("handler.channel_close {:?}", channel_num);
-                Ok(Authenticated::future_unit(
-                    handler.channel_close(channel_num, self),
-                ))
-            }
-            msg::CHANNEL_EOF => {
-                let mut r = buf.reader(1);
-                let channel_num = ChannelId(r.read_u32()?);
-                debug!("handler.channel_eof {:?}", channel_num);
-                Ok(Authenticated::future_unit(
-                    handler.channel_eof(channel_num, self),
-                ))
-            }
-            msg::CHANNEL_EXTENDED_DATA |
-            msg::CHANNEL_DATA => {
-                let mut r = buf.reader(1);
-                let channel_num = ChannelId(r.read_u32()?);
-
-                let ext = if buf[0] == msg::CHANNEL_DATA {
-                    None
-                } else {
-                    Some(r.read_u32()?)
-                };
-                debug!("handler.data {:?} {:?}", ext, channel_num);
-                let data = r.read_string()?;
-                let target = self.common.config.window_size;
-                if let Some(ref mut enc) = self.common.encrypted {
-                    enc.adjust_window_size(channel_num, data, target);
-                }
-                self.flush()?;
-                if let Some(ext) = ext {
-                    Ok(Authenticated::future_unit(
-                        handler.extended_data(channel_num, ext, &data, self),
-                    ))
-                } else {
-                    Ok(Authenticated::future_unit(
-                        handler.data(channel_num, &data, self),
-                    ))
-                }
-            }
-
-            msg::CHANNEL_WINDOW_ADJUST => {
-                let mut r = buf.reader(1);
-                let channel_num = ChannelId(r.read_u32()?);
-                let amount = r.read_u32()?;
-                let mut new_value = 0;
-                if let Some(ref mut enc) = self.common.encrypted {
-                    if let Some(channel) = enc.channels.get_mut(&channel_num) {
-                        channel.recipient_window_size += amount;
-                        new_value = channel.recipient_window_size;
-                    } else {
-                        return Err(HandlerError::Error(Error::WrongChannel));
+            EncryptedState::WaitingAuthRequest(ref mut auth)
+                if buf[0] == msg::USERAUTH_INFO_RESPONSE =>
+            {
+                if read_userauth_info_response(
+                    instant,
+                    handler,
+                    &mut enc.write,
+                    auth,
+                    &mut self.common.auth_user,
+                    buf,
+                )
+                .await?
+                {
+                    if let EncryptedState::InitCompression = enc.state {
+                        enc.client_compression.init_decompress(&mut enc.decompress);
                     }
                 }
-                debug!("handler.window_adjusted {:?}", channel_num);
-                Ok(Authenticated::future_unit(handler.window_adjusted(
-                    channel_num,
-                    new_value as usize,
-                    self,
-                )))
+                Ok(self)
             }
-
-            msg::CHANNEL_REQUEST => {
-                let mut r = buf.reader(1);
-                let channel_num = ChannelId(r.read_u32()?);
-                let req_type = r.read_string()?;
-                let wants_reply = r.read_byte()?;
-                if let Some(ref mut enc) = self.common.encrypted {
-                    if let Some(channel) = enc.channels.get_mut(&channel_num) {
-                        channel.wants_reply = wants_reply != 0;
-                    }
-                }
-                match req_type {
-                    b"pty-req" => {
-                        let term = std::str::from_utf8(r.read_string()?)?;
-                        let col_width = r.read_u32()?;
-                        let row_height = r.read_u32()?;
-                        let pix_width = r.read_u32()?;
-                        let pix_height = r.read_u32()?;
-                        let mut modes = [(Pty::TTY_OP_END, 0); 130];
-                        let mut i = 0;
-                        {
-                            let mode_string = r.read_string()?;
-                            while 5 * i < mode_string.len() {
-                                let code = mode_string[5 * i];
-                                if code == 0 {
-                                    break;
-                                }
-                                let num = BigEndian::read_u32(&mode_string[5 * i + 1..]);
-                                debug!("code = {:?}", code);
-                                if let Some(code) = Pty::from_u8(code) {
-                                    modes[i] = (code, num);
-                                } else {
-                                    info!("pty-req: unknown pty code {:?}", code);
-                                }
-                                i += 1
-                            }
-                        }
-                        debug!("handler.pty_request {:?}", channel_num);
-                        Ok(Authenticated::future_unit(handler.pty_request(
-                            channel_num,
-                            term,
-                            col_width,
-                            row_height,
-                            pix_width,
-                            pix_height,
-                            &modes[0..i],
-                            self,
-                        )))
-                    }
-                    b"x11-req" => {
-                        let single_connection = r.read_byte()? != 0;
-                        let x11_auth_protocol = std::str::from_utf8(r.read_string()?)?;
-                        let x11_auth_cookie = std::str::from_utf8(r.read_string()?)?;
-                        let x11_screen_number = r.read_u32()?;
-                        debug!("handler.x11_request {:?}", channel_num);
-                        Ok(Authenticated::future_unit(handler.x11_request(
-                            channel_num,
-                            single_connection,
-                            x11_auth_protocol,
-                            x11_auth_cookie,
-                            x11_screen_number,
-                            self,
-                        )))
-                    }
-                    b"env" => {
-                        let env_variable = std::str::from_utf8(r.read_string()?)?;
-                        let env_value = std::str::from_utf8(r.read_string()?)?;
-                        debug!("handler.env_request {:?}", channel_num);
-                        Ok(Authenticated::future_unit(handler.env_request(
-                            channel_num,
-                            env_variable,
-                            env_value,
-                            self,
-                        )))
-                    }
-                    b"shell" => {
-                        debug!("handler.shell_request {:?}", channel_num);
-                        Ok(Authenticated::future_unit(
-                            handler.shell_request(channel_num, self),
-                        ))
-                    }
-                    b"exec" => {
-                        let req = r.read_string()?;
-                        debug!("handler.exec_request {:?}", channel_num);
-                        Ok(Authenticated::future_unit(
-                            handler.exec_request(channel_num, req, self),
-                        ))
-                    }
-                    b"subsystem" => {
-                        let name = std::str::from_utf8(r.read_string()?)?;
-                        debug!("handler.subsystem_request {:?}", channel_num);
-                        Ok(Authenticated::future_unit(
-                            handler.subsystem_request(channel_num, name, self),
-                        ))
-                    }
-                    b"window-change" => {
-                        let col_width = r.read_u32()?;
-                        let row_height = r.read_u32()?;
-                        let pix_width = r.read_u32()?;
-                        let pix_height = r.read_u32()?;
-                        debug!("handler.window_change {:?}", channel_num);
-                        Ok(Authenticated::future_unit(handler.window_change_request(
-                            channel_num,
-                            col_width,
-                            row_height,
-                            pix_width,
-                            pix_height,
-                            self,
-                        )))
-                    }
-                    b"signal" => {
-                        r.read_byte()?; // should be 0.
-                        let signal_name = Sig::from_name(r.read_string()?)?;
-                        debug!("handler.signal {:?} {:?}", channel_num, signal_name);
-                        Ok(Authenticated::future_unit(
-                            handler.signal(channel_num, signal_name, self),
-                        ))
-                    }
-                    x => {
-                        debug!(
-                            "{:?}, line {:?} req_type = {:?}",
-                            file!(),
-                            line!(),
-                            std::str::from_utf8(x)
-                        );
-                        if let Some(ref mut enc) = self.common.encrypted {
-                            push_packet!(enc.write, {
-                                enc.write.push(msg::CHANNEL_FAILURE);
-                            });
-                        }
-                        Ok(Authenticated::FutureUnit(
-                            FutureUnit::Done(futures::done(Ok((handler, self)))),
-                        ))
-                    }
-                }
+            EncryptedState::InitCompression => {
+                enc.server_compression.init_compress(&mut enc.compress);
+                enc.state = EncryptedState::Authenticated;
+                self.server_read_authenticated(handler, buf).await
             }
-            msg::GLOBAL_REQUEST => {
-                let mut r = buf.reader(1);
-                let req_type = r.read_string()?;
-                self.common.wants_reply = r.read_byte()? != 0;
-                match req_type {
-                    b"tcpip-forward" => {
-                        let address = std::str::from_utf8(r.read_string()?)?;
-                        let port = r.read_u32()?;
-                        debug!("handler.tcpip_forward {:?} {:?}", address, port);
-                        Ok(Authenticated::Forward(Forward {
-                            forward: handler.tcpip_forward(address, port, self),
-                        }))
-                    }
-                    b"cancel-tcpip-forward" => {
-                        let address = std::str::from_utf8(r.read_string()?)?;
-                        let port = r.read_u32()?;
-                        debug!("handler.cancel_tcpip_forward {:?} {:?}", address, port);
-                        Ok(Authenticated::Forward(Forward {
-                            forward: handler.cancel_tcpip_forward(address, port, self),
-                        }))
-                    }
-                    _ => {
-                        if let Some(ref mut enc) = self.common.encrypted {
-                            push_packet!(enc.write, {
-                                enc.write.push(msg::REQUEST_FAILURE);
-                            });
-                        }
-                        Ok(Authenticated::FutureUnit(
-                            FutureUnit::Done(futures::done(Ok((handler, self)))),
-                        ))
-                    }
-                }
-            }
-            m => {
-                debug!("unknown message received: {:?}", m);
-                Ok(Authenticated::FutureUnit(
-                    FutureUnit::Done(futures::done(Ok((handler, self)))),
-                ))
-            }
-        }
-    }
-
-    fn server_handle_channel_open<H: Handler>(
-        mut self,
-        handler: H,
-        buf: &[u8],
-    ) -> Result<FutureUnit<H>, HandlerError<H::Error>> {
-
-        // https://tools.ietf.org/html/rfc4254#section-5.1
-        let mut r = buf.reader(1);
-        let typ = r.read_string()?;
-        let sender = r.read_u32()?;
-        let window = r.read_u32()?;
-        let maxpacket = r.read_u32()?;
-
-        let sender_channel = if let Some(ref mut enc) = self.common.encrypted {
-            enc.new_channel_id()
-        } else {
-            unreachable!()
-        };
-        let channel = Channel {
-            recipient_channel: sender,
-
-            // "sender" is the local end, i.e. we're the sender, the remote is the recipient.
-            sender_channel: sender_channel,
-
-            recipient_window_size: window,
-            sender_window_size: self.common.config.window_size,
-            recipient_maximum_packet_size: maxpacket,
-            sender_maximum_packet_size: self.common.config.maximum_packet_size,
-            confirmed: true,
-            wants_reply: false,
-        };
-        Ok(match typ {
-            b"session" => {
-                self.confirm_channel_open(channel);
-                FutureUnit::H(handler.channel_open_session(sender_channel, self))
-            }
-            b"x11" => {
-                self.confirm_channel_open(channel);
-                let a = std::str::from_utf8(r.read_string()?)?;
-                let b = r.read_u32()?;
-                FutureUnit::H(handler.channel_open_x11(sender_channel, a, b, self))
-            }
-            b"direct-tcpip" => {
-                self.confirm_channel_open(channel);
-                let a = std::str::from_utf8(r.read_string()?)?;
-                let b = r.read_u32()?;
-                let c = std::str::from_utf8(r.read_string()?)?;
-                let d = r.read_u32()?;
-                FutureUnit::H(handler.channel_open_direct_tcpip(
-                    sender_channel,
-                    a,
-                    b,
-                    c,
-                    d,
-                    self,
-                ))
-            }
-            t => {
-                debug!("unknown channel type: {:?}", t);
-                if let Some(ref mut enc) = self.common.encrypted {
-                    push_packet!(enc.write, {
-                        enc.write.push(msg::CHANNEL_OPEN_FAILURE);
-                        enc.write.push_u32_be(sender);
-                        enc.write.push_u32_be(3); // SSH_OPEN_UNKNOWN_CHANNEL_TYPE
-                        enc.write.extend_ssh_string(b"Unknown channel type");
-                        enc.write.extend_ssh_string(b"en");
-                    });
-                }
-                FutureUnit::Done(futures::done(Ok((handler, self))))
-            }
-        })
-    }
-    fn confirm_channel_open(&mut self, channel: Channel) {
-        if let Some(ref mut enc) = self.common.encrypted {
-            server_confirm_channel_open(&mut enc.write, &channel, self.common.config.as_ref());
-            enc.channels.insert(channel.sender_channel, channel);
-            enc.state = Some(EncryptedState::Authenticated);
+            EncryptedState::Authenticated => self.server_read_authenticated(handler, buf).await,
+            _ => Ok(self),
         }
     }
 }
-
-pub enum Authenticated<H: Handler> {
-    FutureUnit(FutureUnit<H>),
-    Forward(Forward<H>),
-}
-
-impl<H: Handler> Authenticated<H> {
-    pub fn poll(&mut self) -> Poll<(H, Session), HandlerError<H::Error>> {
-        match *self {
-            Authenticated::FutureUnit(ref mut a) => a.poll(),
-            Authenticated::Forward(ref mut a) => a.poll(),
-        }
-    }
-}
-
-impl<H: Handler> Authenticated<H> {
-    fn future_unit(h: H::FutureUnit) -> Self {
-        Authenticated::FutureUnit(FutureUnit::H(h))
-    }
-}
-
-pub enum FutureUnit<H: Handler> {
-    H(H::FutureUnit),
-    Done(futures::Done<(H, Session), HandlerError<H::Error>>),
-}
-impl<H: Handler> Future for FutureUnit<H> {
-    type Item = (H, Session);
-    type Error = HandlerError<H::Error>;
-
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        match *self {
-            FutureUnit::H(ref mut a) => a.poll().map_err(HandlerError::Handler),
-            FutureUnit::Done(ref mut a) => a.poll(),
-        }
-    }
-}
-
-pub struct Forward<H: Handler> {
-    forward: H::FutureBool,
-}
-
-impl<H: Handler> Forward<H> {
-    pub fn poll(&mut self) -> Poll<(H, Session), HandlerError<H::Error>> {
-        let (handler, mut session, result) =
-            try_ready!(self.forward.poll().map_err(HandlerError::Handler));
-        if let Some(ref mut enc) = session.common.encrypted {
-            if result {
-                push_packet!(enc.write, enc.write.push(msg::REQUEST_SUCCESS))
-            } else {
-                push_packet!(enc.write, enc.write.push(msg::REQUEST_FAILURE))
-            }
-        }
-        Ok(Async::Ready((handler, session)))
-    }
-}
-
-pub enum ReadAuthRequest<H: Handler> {
-    Req {
-        future: FutureAuth<H>,
-        auth_request: Option<AuthRequest>,
-    },
-    Reject(Option<H>),
-    Accept(Option<H>),
-    UnsupportedMethod(Option<H>),
-}
-
-pub enum FutureAuth<H: Handler> {
-    Password(H::FutureAuth),
-    Pubkey {
-        validate: ValidatePubkey<H>,
-        sig: Vec<u8>,
-        init: Vec<u8>,
-        key: key::PublicKey,
-    },
-    PubkeyProbe {
-        probe: H::FutureAuth,
-        pubkey_algo: Vec<u8>,
-        pubkey_key: Vec<u8>,
-        key: key::PublicKey,
-    },
-    KeyboardInteractive { ki: H::FutureAuth },
-}
-
-pub enum ValidatePubkey<H: Handler> {
-    Valid(Option<H>),
-    Future(H::FutureAuth),
-    Invalid(Option<H>),
-}
-
-impl<H: Handler> ReadAuthRequest<H> {
-    pub(crate) fn poll(
-        &mut self,
-        enc: &mut Encrypted,
-        auth_user: &mut String,
-        buffer: &mut CryptoVec,
-    ) -> Poll<(H, Auth), HandlerError<H::Error>> {
-        match *self {
-            ReadAuthRequest::Req {
-                ref mut future,
-                ref mut auth_request,
-            } => {
-                match *future {
-                    FutureAuth::Password(ref mut fut) => {
-                        debug!("ReadAuthRequest.poll(): Password");
-                        let (handler, auth) = try_ready!(fut.poll().map_err(HandlerError::Handler));
-                        if let Auth::Accept = auth {
-                            server_auth_request_success(&mut enc.write);
-                            enc.state = Some(EncryptedState::Authenticated);
-                            Ok(Async::Ready((handler, Auth::Accept)))
-                        } else {
-                            auth_user.clear();
-                            let mut auth_request = auth_request.take().unwrap();
-                            auth_request.methods = auth_request.methods - MethodSet::PASSWORD;
-                            auth_request.partial_success = false;
-                            enc.reject_auth_request(auth_request);
-                            Ok(Async::Ready((handler, Auth::Reject)))
-                        }
-                    }
-                    FutureAuth::Pubkey {
-                        ref mut validate,
-                        ref sig,
-                        ref init,
-                        ref key,
-                    } => {
-                        debug!("ReadAuthRequest.poll(): Pubkey");
-                        let (handler, is_valid) = match *validate {
-                            ValidatePubkey::Valid(ref mut h) => (h.take().unwrap(), true),
-                            ValidatePubkey::Future(ref mut h) => {
-                                let (handler, auth) =
-                                    try_ready!(h.poll().map_err(HandlerError::Handler));
-                                (handler, auth == Auth::Accept)
-                            }
-                            ValidatePubkey::Invalid(ref mut h) => (h.take().unwrap(), false),
-                        };
-                        if is_valid {
-                            buffer.clear();
-                            buffer.extend_ssh_string(enc.session_id.as_ref());
-                            buffer.extend(init);
-                            // Verify signature.
-                            if key.verify_client_auth(buffer, sig) {
-                                debug!("signature verified");
-                                server_auth_request_success(&mut enc.write);
-                                enc.state = Some(EncryptedState::Authenticated);
-                                return Ok(Async::Ready((handler, Auth::Accept)));
-                            } else {
-                                debug!("signature wrong");
-                            }
-                        }
-                        Ok(Async::Ready((handler, Auth::Reject)))
-                    }
-                    FutureAuth::PubkeyProbe {
-                        ref mut probe,
-                        ref pubkey_algo,
-                        ref pubkey_key,
-                        ..
-                    } => {
-                        debug!("ReadAuthRequest.poll(): PubkeyProbe");
-                        let (handler, auth) =
-                            try_ready!(probe.poll().map_err(HandlerError::Handler));
-                        if let Auth::Accept = auth {
-
-                            let mut public_key = CryptoVec::new();
-                            public_key.extend(pubkey_key);
-
-                            let mut algo = CryptoVec::new();
-                            algo.extend(pubkey_algo);
-                            debug!("pubkey_key: {:?}", pubkey_key);
-                            push_packet!(enc.write, {
-                                enc.write.push(msg::USERAUTH_PK_OK);
-                                enc.write.extend_ssh_string(&pubkey_algo);
-                                enc.write.extend_ssh_string(&pubkey_key);
-                            });
-
-                            let mut auth_request = auth_request.take().unwrap();
-                            auth_request.current = Some(CurrentRequest::PublicKey {
-                                key: public_key,
-                                algo: algo,
-                                sent_pk_ok: true,
-                            });
-
-                            enc.state = Some(EncryptedState::WaitingAuthRequest(auth_request));
-                            Ok(Async::Ready((handler, Auth::Accept)))
-                        } else {
-                            let mut auth_request = auth_request.take().unwrap();
-                            // auth_request.methods -= MethodSet::PUBLICKEY;
-                            auth_request.partial_success = false;
-                            auth_user.clear();
-                            enc.reject_auth_request(auth_request);
-                            Ok(Async::Ready((handler, Auth::Reject)))
-                        }
-                    }
-                    FutureAuth::KeyboardInteractive { ref mut ki } => {
-
-                        match try_ready!(ki.poll().map_err(HandlerError::Handler)) {
-                            (handler, Auth::Accept) => {
-                                server_auth_request_success(&mut enc.write);
-                                enc.state = Some(EncryptedState::Authenticated);
-                                Ok(Async::Ready((handler, Auth::Accept)))
-                            }
-                            (_, Auth::UnsupportedMethod) => unreachable!(),
-                            (handler, Auth::Reject) => {
-                                let mut auth_request = auth_request.take().unwrap();
-                                // auth_request.methods -= KEYBOARD_INTERACTIVE;
-                                auth_request.partial_success = false;
-                                auth_user.clear();
-                                enc.reject_auth_request(auth_request);
-                                Ok(Async::Ready((handler, Auth::Reject)))
-                            }
-                            (handler,
-                             Auth::Partial {
-                                 name,
-                                 instructions,
-                                 prompts,
-                             }) => {
-
-                                push_packet!(enc.write, {
-                                    enc.write.push(msg::USERAUTH_INFO_REQUEST);
-                                    enc.write.extend_ssh_string(name.as_bytes());
-                                    enc.write.extend_ssh_string(instructions.as_bytes());
-                                    enc.write.extend_ssh_string(b""); // lang, should be empty
-                                    enc.write.push_u32_be(prompts.len() as u32);
-                                    for &(ref a, b) in prompts.iter() {
-                                        enc.write.extend_ssh_string(a.as_bytes());
-                                        enc.write.push(if b { 1 } else { 0 });
-                                    }
-                                });
-                                let auth_request = auth_request.take().unwrap();
-                                enc.state = Some(EncryptedState::WaitingAuthRequest(auth_request));
-                                Ok(Async::Ready((
-                                    handler,
-                                    Auth::Partial {
-                                        name: name,
-                                        instructions: instructions,
-                                        prompts: prompts,
-                                    },
-                                )))
-                            }
-                        }
-
-                    }
-                }
-
-            }
-            ReadAuthRequest::Reject(ref mut h) => {
-                Ok(Async::Ready((h.take().unwrap(), Auth::Reject)))
-            }
-            ReadAuthRequest::UnsupportedMethod(ref mut h) => {
-                Ok(Async::Ready((h.take().unwrap(), Auth::UnsupportedMethod)))
-            }
-            ReadAuthRequest::Accept(ref mut h) => {
-                Ok(Async::Ready((h.take().unwrap(), Auth::Accept)))
-            }
-        }
-    }
-}
-
-impl Encrypted {
-    /// Returns false iff the request was rejected.
-    fn server_read_auth_request<H: Handler>(
-        &mut self,
-        handler: H,
-        buf: &[u8],
-        auth_user: &mut String,
-        mut auth_request: AuthRequest,
-    ) -> Result<ReadAuthRequest<H>, HandlerError<H::Error>> {
-
-        // https://tools.ietf.org/html/rfc4252#section-5
-        let mut r = buf.reader(1);
-        let user = r.read_string()?;
-        let user = std::str::from_utf8(user)?;
-        let service_name = r.read_string()?;
-        let method = r.read_string()?;
-        debug!(
-            "name: {:?} {:?} {:?}",
-            user,
-            std::str::from_utf8(service_name),
-            std::str::from_utf8(method)
-        );
-
-        if service_name == b"ssh-connection" {
-
-            if method == b"password" {
-
-                auth_user.clear();
-                auth_user.push_str(user);
-
-                r.read_byte()?;
-                let password = r.read_string()?;
-                let password = std::str::from_utf8(password)?;
-
-                Ok(ReadAuthRequest::Req {
-                    future: FutureAuth::Password(handler.auth_password(user, password)),
-                    auth_request: Some(auth_request),
-                })
-
-            } else if method == b"publickey" {
-
-                let is_real = r.read_byte()?;
-                let pubkey_algo = r.read_string()?;
-                let pubkey_key = r.read_string()?;
-                debug!("algo: {:?}, key: {:?}", pubkey_algo, pubkey_key);
-                match key::PublicKey::parse(pubkey_algo, pubkey_key) {
-                    Ok(pubkey) => {
-                        debug!("is_real = {:?}", is_real);
-
-                        if is_real != 0 {
-
-                            let pos0 = r.position;
-                            let sent_pk_ok = if let Some(CurrentRequest::PublicKey {
-                                                             sent_pk_ok, ..
-                                                         }) = auth_request.current
-                            {
-                                sent_pk_ok
-                            } else {
-                                false
-                            };
-
-                            let signature = r.read_string()?;
-                            let mut s = signature.reader(0);
-                            let algo_ = s.read_string()?;
-                            debug!("algo_: {:?}", algo_);
-                            let sig = s.read_string()?;
-                            let init = &buf[0..pos0];
-
-                            let validate = if sent_pk_ok && user == auth_user {
-                                ValidatePubkey::Valid(Some(handler))
-                            } else if auth_user.len() == 0 {
-                                auth_user.clear();
-                                auth_user.push_str(user);
-                                ValidatePubkey::Future(handler.auth_publickey(user, &pubkey))
-                            } else {
-                                ValidatePubkey::Invalid(Some(handler))
-                            };
-
-                            Ok(ReadAuthRequest::Req {
-                                future: FutureAuth::Pubkey {
-                                    validate: validate,
-                                    sig: sig.to_vec(),
-                                    init: init.to_vec(),
-                                    key: pubkey,
-                                },
-                                auth_request: Some(auth_request),
-                            })
-
-                        } else {
-                            auth_user.clear();
-                            auth_user.push_str(user);
-
-                            Ok(ReadAuthRequest::Req {
-                                future: FutureAuth::PubkeyProbe {
-                                    probe: handler.auth_publickey(user, &pubkey),
-                                    pubkey_algo: pubkey_algo.to_vec(),
-                                    pubkey_key: pubkey_key.to_vec(),
-                                    key: pubkey,
-                                },
-                                auth_request: Some(auth_request),
-                            })
-                        }
-                    }
-                    Err(e) => {
-                        if let thrussh_keys::Error::CouldNotReadKey = e {
-                            self.reject_auth_request(auth_request);
-                            Ok(ReadAuthRequest::Reject(Some(handler)))
-                        } else {
-                            return Err(HandlerError::Error(Error::from(e)))
-                        }
-                    }
-                }
-            // Other methods of the base specification are insecure or optional.
-            } else if method == b"keyboard-interactive" {
-
-                auth_user.clear();
-                auth_user.push_str(user);
-                let _ = r.read_string()?; // language_tag, deprecated.
-                let submethods = std::str::from_utf8(r.read_string()?)?;
-                debug!("{:?}", submethods);
-                auth_request.current = Some(CurrentRequest::KeyboardInteractive {
-                    submethods: submethods.to_string(),
-                });
-                Ok(ReadAuthRequest::Req {
-                    future: FutureAuth::KeyboardInteractive {
-                        ki: handler.auth_keyboard_interactive(user, submethods, None),
-                    },
-                    auth_request: Some(auth_request),
-                })
-
-            } else {
-                self.reject_auth_request(auth_request);
-                Ok(ReadAuthRequest::UnsupportedMethod(Some(handler)))
-            }
-        } else {
-            // Unknown service
-            Err(HandlerError::Error(Error::Inconsistent))
-        }
-    }
-
-    fn read_userauth_info_response<H: Handler>(
-        &mut self,
-        handler: H,
-        user: &mut String,
-        auth_request: AuthRequest,
-        b: &[u8],
-    ) -> Result<ReadAuthRequest<H>, HandlerError<H::Error>> {
-
-        let ki = if let Some(CurrentRequest::KeyboardInteractive { ref submethods }) =
-            auth_request.current
-        {
-            let mut r = b.reader(1);
-            let n = r.read_u32()?;
-            let response = Response { pos: r, n: n };
-            handler.auth_keyboard_interactive(user, submethods, Some(response))
-        } else {
-            return Ok(ReadAuthRequest::Reject(Some(handler)));
-        };
-
-        Ok(ReadAuthRequest::Req {
-            future: FutureAuth::KeyboardInteractive { ki: ki },
-            auth_request: Some(auth_request),
-        })
-    }
-
-    fn reject_auth_request(&mut self, mut auth_request: AuthRequest) {
-        debug!("rejecting {:?}", auth_request);
-        push_packet!(self.write, {
-            self.write.push(msg::USERAUTH_FAILURE);
-            self.write.extend_list(auth_request.methods);
-            self.write.push(
-                if auth_request.partial_success { 1 } else { 0 },
-            );
-        });
-        auth_request.current = None;
-        auth_request.rejection_count += 1;
-        debug!("packet pushed");
-        self.state = Some(EncryptedState::WaitingAuthRequest(auth_request));
-    }
-}
-
-
-
-
 
 fn server_accept_service(
     banner: Option<&str>,
     methods: MethodSet,
     buffer: &mut CryptoVec,
 ) -> AuthRequest {
-
     push_packet!(buffer, {
         buffer.push(msg::SERVICE_ACCEPT);
         buffer.extend_ssh_string(b"ssh-userauth");
@@ -952,16 +171,700 @@ fn server_accept_service(
     }
 }
 
+impl Encrypted {
+    /// Returns false iff the request was rejected.
+    async fn server_read_auth_request<H: Handler>(
+        &mut self,
+        until: Instant,
+        handler: &mut Option<H>,
+        buf: &[u8],
+        auth_user: &mut String,
+    ) -> Result<(), H::Error> {
+        // https://tools.ietf.org/html/rfc4252#section-5
+        let mut r = buf.reader(1);
+        let user = r.read_string().map_err(crate::Error::from)?;
+        let user = std::str::from_utf8(user).map_err(crate::Error::from)?;
+        let service_name = r.read_string().map_err(crate::Error::from)?;
+        let method = r.read_string().map_err(crate::Error::from)?;
+        debug!(
+            "name: {:?} {:?} {:?}",
+            user,
+            std::str::from_utf8(service_name),
+            std::str::from_utf8(method)
+        );
+
+        if service_name == b"ssh-connection" {
+            if method == b"password" {
+                let auth_request = if let EncryptedState::WaitingAuthRequest(ref mut a) = self.state
+                {
+                    a
+                } else {
+                    unreachable!()
+                };
+                auth_user.clear();
+                auth_user.push_str(user);
+                r.read_byte().map_err(crate::Error::from)?;
+                let password = r.read_string().map_err(crate::Error::from)?;
+                let password = std::str::from_utf8(password).map_err(crate::Error::from)?;
+                let handler_ = handler.take().unwrap();
+                let (handler_, auth) = handler_.auth_password(user, password).await?;
+                *handler = Some(handler_);
+                if let Auth::Accept = auth {
+                    server_auth_request_success(&mut self.write);
+                    self.state = EncryptedState::InitCompression;
+                } else {
+                    auth_user.clear();
+                    auth_request.methods = auth_request.methods - MethodSet::PASSWORD;
+                    auth_request.partial_success = false;
+                    reject_auth_request(until, &mut self.write, auth_request).await;
+                }
+                Ok(())
+            } else if method == b"publickey" {
+                self.server_read_auth_request_pk(until, handler, buf, auth_user, user, r)
+                    .await
+            } else if method == b"keyboard-interactive" {
+                let auth_request = if let EncryptedState::WaitingAuthRequest(ref mut a) = self.state
+                {
+                    a
+                } else {
+                    unreachable!()
+                };
+                auth_user.clear();
+                auth_user.push_str(user);
+                let _ = r.read_string().map_err(crate::Error::from)?; // language_tag, deprecated.
+                let submethods = std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                    .map_err(crate::Error::from)?;
+                debug!("{:?}", submethods);
+                auth_request.current = Some(CurrentRequest::KeyboardInteractive {
+                    submethods: submethods.to_string(),
+                });
+                let h = handler.take().unwrap();
+                let (h, auth) = h.auth_keyboard_interactive(user, submethods, None).await?;
+                *handler = Some(h);
+                if reply_userauth_info_response(until, auth_request, &mut self.write, auth).await? {
+                    self.state = EncryptedState::InitCompression
+                }
+                Ok(())
+            } else {
+                // Other methods of the base specification are insecure or optional.
+                let auth_request = if let EncryptedState::WaitingAuthRequest(ref mut a) = self.state
+                {
+                    a
+                } else {
+                    unreachable!()
+                };
+                reject_auth_request(until, &mut self.write, auth_request).await;
+                Ok(())
+            }
+        } else {
+            // Unknown service
+            Err(Error::Inconsistent.into())
+        }
+    }
+}
+
+thread_local! {
+    static SIGNATURE_BUFFER: RefCell<CryptoVec> = RefCell::new(CryptoVec::new());
+}
+
+impl Encrypted {
+    async fn server_read_auth_request_pk<'a, H: Handler>(
+        &mut self,
+        until: Instant,
+        handler: &mut Option<H>,
+        buf: &[u8],
+        auth_user: &mut String,
+        user: &str,
+        mut r: Position<'a>,
+    ) -> Result<(), H::Error> {
+        let auth_request = if let EncryptedState::WaitingAuthRequest(ref mut a) = self.state {
+            a
+        } else {
+            unreachable!()
+        };
+        let is_real = r.read_byte().map_err(crate::Error::from)?;
+        let pubkey_algo = r.read_string().map_err(crate::Error::from)?;
+        let pubkey_key = r.read_string().map_err(crate::Error::from)?;
+        debug!("algo: {:?}, key: {:?}", pubkey_algo, pubkey_key);
+        match key::PublicKey::parse(pubkey_algo, pubkey_key) {
+            Ok(mut pubkey) => {
+                debug!("is_real = {:?}", is_real);
+
+                if is_real != 0 {
+                    let pos0 = r.position;
+                    let sent_pk_ok = if let Some(CurrentRequest::PublicKey { sent_pk_ok, .. }) =
+                        auth_request.current
+                    {
+                        sent_pk_ok
+                    } else {
+                        false
+                    };
+
+                    let signature = r.read_string().map_err(crate::Error::from)?;
+                    debug!("signature = {:?}", signature);
+                    let mut s = signature.reader(0);
+                    let algo_ = s.read_string().map_err(crate::Error::from)?;
+                    pubkey.set_algorithm(algo_);
+                    debug!("algo_: {:?}", algo_);
+                    let sig = s.read_string().map_err(crate::Error::from)?;
+                    let init = &buf[0..pos0];
+
+                    let is_valid = if sent_pk_ok && user == auth_user {
+                        true
+                    } else if auth_user.len() == 0 {
+                        auth_user.clear();
+                        auth_user.push_str(user);
+                        let h = handler.take().unwrap();
+                        let (h, auth) = h.auth_publickey(user, &pubkey).await?;
+                        *handler = Some(h);
+                        auth == Auth::Accept
+                    } else {
+                        false
+                    };
+                    if is_valid {
+                        let session_id = self.session_id.as_ref();
+                        if SIGNATURE_BUFFER.with(|buf| {
+                            let mut buf = buf.borrow_mut();
+                            buf.clear();
+                            buf.extend_ssh_string(session_id);
+                            buf.extend(init);
+                            // Verify signature.
+                            pubkey.verify_client_auth(&buf, sig)
+                        }) {
+                            debug!("signature verified");
+                            server_auth_request_success(&mut self.write);
+                            self.state = EncryptedState::InitCompression;
+                        } else {
+                            debug!("signature wrong");
+                            reject_auth_request(until, &mut self.write, auth_request).await;
+                        }
+                    } else {
+                        reject_auth_request(until, &mut self.write, auth_request).await;
+                    }
+                    Ok(())
+                } else {
+                    auth_user.clear();
+                    auth_user.push_str(user);
+                    let h = handler.take().unwrap();
+                    let (h, auth) = h.auth_publickey(user, &pubkey).await?;
+                    *handler = Some(h);
+                    if auth == Auth::Accept {
+                        let mut public_key = CryptoVec::new();
+                        public_key.extend(pubkey_key);
+
+                        let mut algo = CryptoVec::new();
+                        algo.extend(pubkey_algo);
+                        debug!("pubkey_key: {:?}", pubkey_key);
+                        push_packet!(self.write, {
+                            self.write.push(msg::USERAUTH_PK_OK);
+                            self.write.extend_ssh_string(&pubkey_algo);
+                            self.write.extend_ssh_string(&pubkey_key);
+                        });
+
+                        auth_request.current = Some(CurrentRequest::PublicKey {
+                            key: public_key,
+                            algo: algo,
+                            sent_pk_ok: true,
+                        });
+                    } else {
+                        debug!("signature wrong");
+                        auth_request.partial_success = false;
+                        auth_user.clear();
+                        reject_auth_request(until, &mut self.write, auth_request).await;
+                    }
+                    Ok(())
+                }
+            }
+            Err(e) => {
+                if let thrussh_keys::Error::CouldNotReadKey = e {
+                    reject_auth_request(until, &mut self.write, auth_request).await;
+                    Ok(())
+                } else {
+                    Err(crate::Error::from(e).into())
+                }
+            }
+        }
+    }
+}
+
+async fn reject_auth_request(
+    until: Instant,
+    write: &mut CryptoVec,
+    auth_request: &mut AuthRequest,
+) {
+    debug!("rejecting {:?}", auth_request);
+    push_packet!(write, {
+        write.push(msg::USERAUTH_FAILURE);
+        write.extend_list(auth_request.methods);
+        write.push(if auth_request.partial_success { 1 } else { 0 });
+    });
+    auth_request.current = None;
+    auth_request.rejection_count += 1;
+    debug!("packet pushed");
+    tokio::time::sleep_until(until).await
+}
 
 fn server_auth_request_success(buffer: &mut CryptoVec) {
-
     push_packet!(buffer, {
         buffer.push(msg::USERAUTH_SUCCESS);
     })
 }
 
-fn server_confirm_channel_open(buffer: &mut CryptoVec, channel: &Channel, config: &Config) {
+async fn read_userauth_info_response<H: Handler>(
+    until: Instant,
+    handler: &mut Option<H>,
+    write: &mut CryptoVec,
+    auth_request: &mut AuthRequest,
+    user: &mut String,
+    b: &[u8],
+) -> Result<bool, H::Error> {
+    if let Some(CurrentRequest::KeyboardInteractive { ref submethods }) = auth_request.current {
+        let mut r = b.reader(1);
+        let n = r.read_u32().map_err(crate::Error::from)?;
+        let response = Response { pos: r, n: n };
+        let h = handler.take().unwrap();
+        let (h, auth) = h
+            .auth_keyboard_interactive(user, submethods, Some(response))
+            .await?;
+        *handler = Some(h);
+        reply_userauth_info_response(until, auth_request, write, auth)
+            .await
+            .map_err(|e| H::Error::from(crate::Error::from(e)))
+    } else {
+        reject_auth_request(until, write, auth_request).await;
+        Ok(false)
+    }
+}
 
+async fn reply_userauth_info_response(
+    until: Instant,
+    auth_request: &mut AuthRequest,
+    write: &mut CryptoVec,
+    auth: Auth,
+) -> Result<bool, Error> {
+    match auth {
+        Auth::Accept => {
+            server_auth_request_success(write);
+            Ok(true)
+        }
+        Auth::Reject => {
+            auth_request.partial_success = false;
+            reject_auth_request(until, write, auth_request).await;
+            Ok(false)
+        }
+        Auth::Partial {
+            name,
+            instructions,
+            prompts,
+        } => {
+            push_packet!(write, {
+                write.push(msg::USERAUTH_INFO_REQUEST);
+                write.extend_ssh_string(name.as_bytes());
+                write.extend_ssh_string(instructions.as_bytes());
+                write.extend_ssh_string(b""); // lang, should be empty
+                write.push_u32_be(prompts.len() as u32);
+                for &(ref a, b) in prompts.iter() {
+                    write.extend_ssh_string(a.as_bytes());
+                    write.push(if b { 1 } else { 0 });
+                }
+            });
+            Ok(false)
+        }
+        Auth::UnsupportedMethod => unreachable!(),
+    }
+}
+
+impl Session {
+    async fn server_read_authenticated<H: Handler>(
+        mut self,
+        handler: &mut Option<H>,
+        buf: &[u8],
+    ) -> Result<Self, H::Error> {
+        debug!(
+            "authenticated buf = {:?}",
+            &buf[..std::cmp::min(buf.len(), 100)]
+        );
+        match buf[0] {
+            msg::CHANNEL_OPEN => self.server_handle_channel_open(handler, buf).await,
+            msg::CHANNEL_CLOSE => {
+                let mut r = buf.reader(1);
+                let channel_num = ChannelId(r.read_u32().map_err(crate::Error::from)?);
+                if let Some(ref mut enc) = self.common.encrypted {
+                    enc.channels.remove(&channel_num);
+                }
+                debug!("handler.channel_close {:?}", channel_num);
+                let h = handler.take().unwrap();
+                let (h, s) = h.channel_close(channel_num, self).await?;
+                *handler = Some(h);
+                Ok(s)
+            }
+            msg::CHANNEL_EOF => {
+                let mut r = buf.reader(1);
+                let channel_num = ChannelId(r.read_u32().map_err(crate::Error::from)?);
+                debug!("handler.channel_eof {:?}", channel_num);
+                let h = handler.take().unwrap();
+                let (h, s) = h.channel_eof(channel_num, self).await?;
+                *handler = Some(h);
+                Ok(s)
+            }
+            msg::CHANNEL_EXTENDED_DATA | msg::CHANNEL_DATA => {
+                let mut r = buf.reader(1);
+                let channel_num = ChannelId(r.read_u32().map_err(crate::Error::from)?);
+
+                let ext = if buf[0] == msg::CHANNEL_DATA {
+                    None
+                } else {
+                    Some(r.read_u32().map_err(crate::Error::from)?)
+                };
+                debug!("handler.data {:?} {:?}", ext, channel_num);
+                let data = r.read_string().map_err(crate::Error::from)?;
+                let target = self.target_window_size;
+
+                let mut h = handler.take().unwrap();
+                if let Some(ref mut enc) = self.common.encrypted {
+                    if enc.adjust_window_size(channel_num, data, target) {
+                        let window = h.adjust_window(channel_num, self.target_window_size);
+                        if window > 0 {
+                            self.target_window_size = window
+                        }
+                    }
+                }
+                self.flush()?;
+                let (h, s) = if let Some(ext) = ext {
+                    h.extended_data(channel_num, ext, &data, self).await?
+                } else {
+                    h.data(channel_num, &data, self).await?
+                };
+                *handler = Some(h);
+                Ok(s)
+            }
+
+            msg::CHANNEL_WINDOW_ADJUST => {
+                let mut r = buf.reader(1);
+                let channel_num = ChannelId(r.read_u32().map_err(crate::Error::from)?);
+                let amount = r.read_u32().map_err(crate::Error::from)?;
+                let mut new_value = 0;
+                if let Some(ref mut enc) = self.common.encrypted {
+                    if let Some(channel) = enc.channels.get_mut(&channel_num) {
+                        channel.recipient_window_size += amount;
+                        new_value = channel.recipient_window_size;
+                    } else {
+                        return Err(Error::WrongChannel.into());
+                    }
+                }
+                debug!("handler.window_adjusted {:?}", channel_num);
+                let h = handler.take().unwrap();
+                let (h, s) = h
+                    .window_adjusted(channel_num, new_value as usize, self)
+                    .await?;
+                *handler = Some(h);
+                Ok(s)
+            }
+
+            msg::CHANNEL_REQUEST => {
+                let mut r = buf.reader(1);
+                let channel_num = ChannelId(r.read_u32().map_err(crate::Error::from)?);
+                let req_type = r.read_string().map_err(crate::Error::from)?;
+                let wants_reply = r.read_byte().map_err(crate::Error::from)?;
+                if let Some(ref mut enc) = self.common.encrypted {
+                    if let Some(channel) = enc.channels.get_mut(&channel_num) {
+                        channel.wants_reply = wants_reply != 0;
+                    }
+                }
+                match req_type {
+                    b"pty-req" => {
+                        let term =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        let col_width = r.read_u32().map_err(crate::Error::from)?;
+                        let row_height = r.read_u32().map_err(crate::Error::from)?;
+                        let pix_width = r.read_u32().map_err(crate::Error::from)?;
+                        let pix_height = r.read_u32().map_err(crate::Error::from)?;
+                        let mut modes = [(Pty::TTY_OP_END, 0); 130];
+                        let mut i = 0;
+                        {
+                            let mode_string = r.read_string().map_err(crate::Error::from)?;
+                            while 5 * i < mode_string.len() {
+                                let code = mode_string[5 * i];
+                                if code == 0 {
+                                    break;
+                                }
+                                let num = BigEndian::read_u32(&mode_string[5 * i + 1..]);
+                                debug!("code = {:?}", code);
+                                if let Some(code) = Pty::from_u8(code) {
+                                    modes[i] = (code, num);
+                                } else {
+                                    info!("pty-req: unknown pty code {:?}", code);
+                                }
+                                i += 1
+                            }
+                        }
+                        debug!("handler.pty_request {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h
+                            .pty_request(
+                                channel_num,
+                                term,
+                                col_width,
+                                row_height,
+                                pix_width,
+                                pix_height,
+                                &modes[0..i],
+                                self,
+                            )
+                            .await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    b"x11-req" => {
+                        let single_connection = r.read_byte().map_err(crate::Error::from)? != 0;
+                        let x11_auth_protocol =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        let x11_auth_cookie =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        let x11_screen_number = r.read_u32().map_err(crate::Error::from)?;
+                        debug!("handler.x11_request {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h
+                            .x11_request(
+                                channel_num,
+                                single_connection,
+                                x11_auth_protocol,
+                                x11_auth_cookie,
+                                x11_screen_number,
+                                self,
+                            )
+                            .await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    b"env" => {
+                        let env_variable =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        let env_value =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        debug!("handler.env_request {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h
+                            .env_request(channel_num, env_variable, env_value, self)
+                            .await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    b"shell" => {
+                        debug!("handler.shell_request {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h.shell_request(channel_num, self).await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    b"exec" => {
+                        let req = r.read_string().map_err(crate::Error::from)?;
+                        debug!("handler.exec_request {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h.exec_request(channel_num, req, self).await?;
+                        *handler = Some(h);
+                        debug!("executed");
+                        Ok(s)
+                    }
+                    b"subsystem" => {
+                        let name =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        debug!("handler.subsystem_request {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h.subsystem_request(channel_num, name, self).await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    b"window-change" => {
+                        let col_width = r.read_u32().map_err(crate::Error::from)?;
+                        let row_height = r.read_u32().map_err(crate::Error::from)?;
+                        let pix_width = r.read_u32().map_err(crate::Error::from)?;
+                        let pix_height = r.read_u32().map_err(crate::Error::from)?;
+                        debug!("handler.window_change {:?}", channel_num);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h
+                            .window_change_request(
+                                channel_num,
+                                col_width,
+                                row_height,
+                                pix_width,
+                                pix_height,
+                                self,
+                            )
+                            .await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    b"signal" => {
+                        r.read_byte().map_err(crate::Error::from)?; // should be 0.
+                        let signal_name =
+                            Sig::from_name(r.read_string().map_err(crate::Error::from)?)?;
+                        debug!("handler.signal {:?} {:?}", channel_num, signal_name);
+                        let h = handler.take().unwrap();
+                        let (h, s) = h.signal(channel_num, signal_name, self).await?;
+                        *handler = Some(h);
+                        Ok(s)
+                    }
+                    x => {
+                        warn!("unknown channel request {}", String::from_utf8_lossy(x));
+                        self.channel_failure(channel_num);
+                        Ok(self)
+                    }
+                }
+            }
+            msg::GLOBAL_REQUEST => {
+                let mut r = buf.reader(1);
+                let req_type = r.read_string().map_err(crate::Error::from)?;
+                self.common.wants_reply = r.read_byte().map_err(crate::Error::from)? != 0;
+                match req_type {
+                    b"tcpip-forward" => {
+                        let address =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        let port = r.read_u32().map_err(crate::Error::from)?;
+                        debug!("handler.tcpip_forward {:?} {:?}", address, port);
+                        let h = handler.take().unwrap();
+                        let (h, mut s, result) = h.tcpip_forward(address, port, self).await?;
+                        *handler = Some(h);
+                        if let Some(ref mut enc) = s.common.encrypted {
+                            if result {
+                                push_packet!(enc.write, enc.write.push(msg::REQUEST_SUCCESS))
+                            } else {
+                                push_packet!(enc.write, enc.write.push(msg::REQUEST_FAILURE))
+                            }
+                        }
+                        Ok(s)
+                    }
+                    b"cancel-tcpip-forward" => {
+                        let address =
+                            std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                                .map_err(crate::Error::from)?;
+                        let port = r.read_u32().map_err(crate::Error::from)?;
+                        debug!("handler.cancel_tcpip_forward {:?} {:?}", address, port);
+                        let h = handler.take().unwrap();
+                        let (h, mut s, result) =
+                            h.cancel_tcpip_forward(address, port, self).await?;
+                        *handler = Some(h);
+                        if let Some(ref mut enc) = s.common.encrypted {
+                            if result {
+                                push_packet!(enc.write, enc.write.push(msg::REQUEST_SUCCESS))
+                            } else {
+                                push_packet!(enc.write, enc.write.push(msg::REQUEST_FAILURE))
+                            }
+                        }
+                        Ok(s)
+                    }
+                    _ => {
+                        if let Some(ref mut enc) = self.common.encrypted {
+                            push_packet!(enc.write, {
+                                enc.write.push(msg::REQUEST_FAILURE);
+                            });
+                        }
+                        Ok(self)
+                    }
+                }
+            }
+            m => {
+                debug!("unknown message received: {:?}", m);
+                Ok(self)
+            }
+        }
+    }
+
+    async fn server_handle_channel_open<H: Handler>(
+        mut self,
+        handler: &mut Option<H>,
+        buf: &[u8],
+    ) -> Result<Self, H::Error> {
+        // https://tools.ietf.org/html/rfc4254#section-5.1
+        let mut r = buf.reader(1);
+        let typ = r.read_string().map_err(crate::Error::from)?;
+        let sender = r.read_u32().map_err(crate::Error::from)?;
+        let window = r.read_u32().map_err(crate::Error::from)?;
+        let maxpacket = r.read_u32().map_err(crate::Error::from)?;
+
+        let sender_channel = if let Some(ref mut enc) = self.common.encrypted {
+            enc.new_channel_id()
+        } else {
+            unreachable!()
+        };
+        let channel = Channel {
+            recipient_channel: sender,
+
+            // "sender" is the local end, i.e. we're the sender, the remote is the recipient.
+            sender_channel: sender_channel,
+
+            recipient_window_size: window,
+            sender_window_size: self.common.config.window_size,
+            recipient_maximum_packet_size: maxpacket,
+            sender_maximum_packet_size: self.common.config.maximum_packet_size,
+            confirmed: true,
+            wants_reply: false,
+            pending_data: std::collections::VecDeque::new(),
+        };
+        match typ {
+            b"session" => {
+                self.confirm_channel_open(channel);
+                let h = handler.take().unwrap();
+                let (h, s) = h.channel_open_session(sender_channel, self).await?;
+                *handler = Some(h);
+                Ok(s)
+            }
+            b"x11" => {
+                self.confirm_channel_open(channel);
+                let a = std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                    .map_err(crate::Error::from)?;
+                let b = r.read_u32().map_err(crate::Error::from)?;
+                let h = handler.take().unwrap();
+                let (h, s) = h.channel_open_x11(sender_channel, a, b, self).await?;
+                *handler = Some(h);
+                Ok(s)
+            }
+            b"direct-tcpip" => {
+                self.confirm_channel_open(channel);
+                let a = std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                    .map_err(crate::Error::from)?;
+                let b = r.read_u32().map_err(crate::Error::from)?;
+                let c = std::str::from_utf8(r.read_string().map_err(crate::Error::from)?)
+                    .map_err(crate::Error::from)?;
+                let d = r.read_u32().map_err(crate::Error::from)?;
+                let h = handler.take().unwrap();
+                let (h, s) = h
+                    .channel_open_direct_tcpip(sender_channel, a, b, c, d, self)
+                    .await?;
+                *handler = Some(h);
+                Ok(s)
+            }
+            t => {
+                debug!("unknown channel type: {:?}", t);
+                if let Some(ref mut enc) = self.common.encrypted {
+                    push_packet!(enc.write, {
+                        enc.write.push(msg::CHANNEL_OPEN_FAILURE);
+                        enc.write.push_u32_be(sender);
+                        enc.write.push_u32_be(3); // SSH_OPEN_UNKNOWN_CHANNEL_TYPE
+                        enc.write.extend_ssh_string(b"Unknown channel type");
+                        enc.write.extend_ssh_string(b"en");
+                    });
+                }
+                Ok(self)
+            }
+        }
+    }
+    fn confirm_channel_open(&mut self, channel: Channel) {
+        if let Some(ref mut enc) = self.common.encrypted {
+            server_confirm_channel_open(&mut enc.write, &channel, self.common.config.as_ref());
+            enc.channels.insert(channel.sender_channel, channel);
+        }
+    }
+}
+
+fn server_confirm_channel_open(buffer: &mut CryptoVec, channel: &Channel, config: &Config) {
     push_packet!(buffer, {
         buffer.push(msg::CHANNEL_OPEN_CONFIRMATION);
         buffer.push_u32_be(channel.recipient_channel); // remote channel number.

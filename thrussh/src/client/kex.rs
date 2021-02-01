@@ -1,10 +1,11 @@
-use super::*;
-use negotiation::Select;
-use cipher::CipherPair;
 use mac::MacPair;
-use negotiation;
 
-use kex;
+use super::*;
+use crate::cipher::CipherPair;
+use crate::negotiation;
+use crate::negotiation::Select;
+
+use crate::kex;
 
 impl KexInit {
     pub fn client_parse(
@@ -15,14 +16,15 @@ impl KexInit {
         buf: &[u8],
         write_buffer: &mut SSHBuffer,
     ) -> Result<KexDhDone, Error> {
-        debug!("client parse");
-        let algo = if self.algo.is_none() {
+        debug!("client parse {:?} {:?}", buf.len(), buf);
+        let algo = {
             // read algorithms from packet.
+            debug!("extending {:?}", &self.exchange.server_kex_init[..]);
             self.exchange.server_kex_init.extend(buf);
             super::negotiation::Client::read_kex(buf, &config.preferred)?
-        } else {
-            return Err(Error::Kex);
         };
+        debug!("algo = {:?}", algo);
+        debug!("write = {:?}", &write_buffer.buffer[..]);
         if !self.sent {
             self.client_write(config, cipher, mac, write_buffer)?
         }
@@ -34,6 +36,7 @@ impl KexInit {
         // then truncate that buffer. Without that, we would need an
         // extra buffer.
         let i0 = self.exchange.client_kex_init.len();
+        debug!("i0 = {:?}", i0);
         let kex = kex::Algorithm::client_dh(
             algo.kex,
             &mut self.exchange.client_ephemeral,
@@ -43,11 +46,11 @@ impl KexInit {
         cipher.write(&self.exchange.client_kex_init[i0..], write_buffer, mac);
         self.exchange.client_kex_init.resize(i0);
 
-        debug!("moving to kexdhdone");
+        debug!("moving to kexdhdone, exchange = {:?}", self.exchange);
         Ok(KexDhDone {
             exchange: self.exchange,
             names: algo,
-            kex: kex,
+            kex,
             key: 0,
             session_id: self.session_id,
         })
@@ -61,10 +64,7 @@ impl KexInit {
         write_buffer: &mut SSHBuffer,
     ) -> Result<(), Error> {
         self.exchange.client_kex_init.clear();
-        negotiation::write_kex(
-            &config.preferred,
-            &mut self.exchange.client_kex_init,
-        )?;
+        negotiation::write_kex(&config.preferred, &mut self.exchange.client_kex_init)?;
         self.sent = true;
         cipher.write(&self.exchange.client_kex_init, write_buffer, mac);
         Ok(())

@@ -13,11 +13,6 @@
 // limitations under the License.
 //
 
-#![deny(missing_docs,
-        trivial_casts,
-        unstable_features,
-        unused_import_braces)]
-
 //! Server and client SSH asynchronous library, based on tokio/futures.
 //!
 //! The normal way to use this library, both for clients and for
@@ -47,6 +42,26 @@
 //! use std::collections::HashMap;
 //! use futures::Future;
 //!
+//! #[tokio::main]
+//! async fn main() {
+//!     let client_key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
+//!     let client_pubkey = Arc::new(client_key.clone_public_key());
+//!     let mut config = thrussh::server::Config::default();
+//!     config.connection_timeout = Some(std::time::Duration::from_secs(3));
+//!     config.auth_rejection_time = std::time::Duration::from_secs(3);
+//!     config.keys.push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
+//!     let config = Arc::new(config);
+//!     let sh = Server{
+//!         client_pubkey,
+//!         clients: Arc::new(Mutex::new(HashMap::new())),
+//!         id: 0
+//!     };
+//!     tokio::time::timeout(
+//!        std::time::Duration::from_secs(1),
+//!        thrussh::server::run(config, "0.0.0.0:2222", sh)
+//!     ).await.unwrap_or(Ok(()));
+//! }
+//!
 //! #[derive(Clone)]
 //! struct Server {
 //!     client_pubkey: Arc<thrussh_keys::key::PublicKey>,
@@ -56,7 +71,7 @@
 //!
 //! impl server::Server for Server {
 //!     type Handler = Self;
-//!     fn new(&mut self) -> Self {
+//!     fn new(&mut self, _: Option<std::net::SocketAddr>) -> Self {
 //!         let s = self.clone();
 //!         self.id += 1;
 //!         s
@@ -64,59 +79,41 @@
 //! }
 //!
 //! impl server::Handler for Server {
-//!     type Error = std::io::Error;
-//!     type FutureAuth = futures::Finished<(Self, server::Auth), Self::Error>;
-//!     type FutureUnit = futures::Finished<(Self, server::Session), Self::Error>;
-//!     type FutureBool = futures::Finished<(Self, server::Session, bool), Self::Error>;
+//!     type FutureAuth = futures::future::Ready<Result<(Self, server::Auth), anyhow::Error>>;
+//!     type FutureUnit = futures::future::Ready<Result<(Self, Session), anyhow::Error>>;
+//!     type FutureBool = futures::future::Ready<Result<(Self, Session, bool), anyhow::Error>>;
 //!
-//!     fn finished_auth(self, auth: Auth) -> Self::FutureAuth {
-//!         futures::finished((self, auth))
+//!     fn finished_auth(mut self, auth: Auth) -> Self::FutureAuth {
+//!         futures::future::ready(Ok((self, auth)))
 //!     }
-//!     fn finished_bool(self, session: Session, b: bool) -> Self::FutureBool {
-//!         futures::finished((self, session, b))
+//!     fn finished_bool(self, b: bool, s: Session) -> Self::FutureBool {
+//!         futures::future::ready(Ok((self, s, b)))
 //!     }
-//!     fn finished(self, session: Session) -> Self::FutureUnit {
-//!         futures::finished((self, session))
+//!     fn finished(self, s: Session) -> Self::FutureUnit {
+//!         futures::future::ready(Ok((self, s)))
 //!     }
 //!     fn channel_open_session(self, channel: ChannelId, session: Session) -> Self::FutureUnit {
 //!         {
 //!             let mut clients = self.clients.lock().unwrap();
 //!             clients.insert((self.id, channel), session.handle());
 //!         }
-//!         futures::finished((self, session))
+//!         self.finished(session)
 //!     }
 //!     fn auth_publickey(self, _: &str, _: &key::PublicKey) -> Self::FutureAuth {
-//!         futures::finished((self, server::Auth::Accept))
+//!         self.finished_auth(server::Auth::Accept)
 //!     }
-//!     fn data(self, channel: ChannelId, data: &[u8], mut session: server::Session) -> Self::FutureUnit {
+//!     fn data(self, channel: ChannelId, data: &[u8], mut session: Session) -> Self::FutureUnit {
 //!         {
 //!             let mut clients = self.clients.lock().unwrap();
 //!             for ((id, channel), ref mut s) in clients.iter_mut() {
 //!                 if *id != self.id {
-//!                     s.data(*channel, None, CryptoVec::from_slice(data));
+//!                     s.data(*channel, CryptoVec::from_slice(data));
 //!                 }
 //!             }
 //!         }
-//!         session.data(channel, None, data);
-//!         futures::finished((self, session))
+//!         session.data(channel, CryptoVec::from_slice(data));
+//!         self.finished(session)
 //!     }
-//! }
-//!
-//! fn main() {
-//!     //! Starting the server thread.
-//!     let client_key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
-//!     let client_pubkey = Arc::new(client_key.clone_public_key());
-//!     let mut config = thrussh::server::Config::default();
-//!     config.connection_timeout = Some(std::time::Duration::from_secs(600));
-//!     config.auth_rejection_time = std::time::Duration::from_secs(3);
-//!     config.keys.push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
-//!     let config = Arc::new(config);
-//!     let sh = Server{
-//!         client_pubkey,
-//!         clients: Arc::new(Mutex::new(HashMap::new())),
-//!         id: 0
-//!     };
-//!     tokio::run(thrussh::server::run(config, "0.0.0.0:2222", sh));
 //! }
 //! ```
 //!
@@ -142,8 +139,8 @@
 //! mostly related to the fact that clients are generally used both in
 //! a synchronous way (in the case of SSH, we can think of sending a
 //! shell command), and asynchronously (because the server may send
-//! unsollicited messages sometimes), and hence need to handle
-//! multiple interfaces.
+//! unsollicited messages), and hence need to handle multiple
+//! interfaces.
 //!
 //! The important types in the `client` module are `Session` and
 //! `Connection`. A `Connection` is typically used to send commands to
@@ -166,63 +163,50 @@
 //!
 //!
 //!struct Client {
-//!  key: Arc<thrussh_keys::key::KeyPair>
 //!}
 //!
 //!impl client::Handler for Client {
-//!    type Error = ();
-//!    type FutureBool = futures::Finished<(Self, bool), Self::Error>;
-//!    type FutureUnit = futures::Finished<Self, Self::Error>;
-//!    type FutureSign = futures::Finished<(Self, thrussh::CryptoVec), Self::Error>;
-//!    type SessionUnit = futures::Finished<(Self, client::Session), Self::Error>;
+//!    type FutureUnit = futures::future::Ready<Result<(Self, client::Session), anyhow::Error>>;
+//!    type FutureBool = futures::future::Ready<Result<(Self, bool), anyhow::Error>>;
+//!
+//!    fn finished_bool(self, b: bool) -> Self::FutureBool {
+//!        futures::future::ready(Ok((self, b)))
+//!    }
+//!    fn finished(self, session: client::Session) -> Self::FutureUnit {
+//!        futures::future::ready(Ok((self, session)))
+//!    }
 //!    fn check_server_key(self, server_public_key: &key::PublicKey) -> Self::FutureBool {
 //!        println!("check_server_key: {:?}", server_public_key);
-//!        futures::finished((self, true))
+//!        self.finished_bool(true)
 //!    }
-//!    fn channel_open_confirmation(self, channel: ChannelId, session: client::Session) -> Self::SessionUnit {
+//!    fn channel_open_confirmation(self, channel: ChannelId, max_packet_size: u32, window_size: u32, session: client::Session) -> Self::FutureUnit {
 //!        println!("channel_open_confirmation: {:?}", channel);
-//!        futures::finished((self, session))
+//!        self.finished(session)
 //!    }
-//!    fn data(self, channel: ChannelId, ext: Option<u32>, data: &[u8], session: client::Session) -> Self::SessionUnit {
-//!        println!("data on channel {:?} {:?}: {:?}", ext, channel, std::str::from_utf8(data));
-//!        futures::finished((self, session))
+//!    fn data(self, channel: ChannelId, data: &[u8], session: client::Session) -> Self::FutureUnit {
+//!        println!("data on channel {:?}: {:?}", channel, std::str::from_utf8(data));
+//!        self.finished(session)
 //!    }
 //!}
 //!
-//!impl Client {
+//! #[tokio::main]
+//! async fn main() {
+//!   let config = thrussh::client::Config::COMPRESSED;
+//!   let config = Arc::new(config);
+//!   let sh = Client{};
 //!
-//!  fn run(self, config: Arc<client::Config>, _: &str) {
-//!     let key = self.key.clone();
-//!     tokio::run(
-//!
-//!       client::connect_future(
-//!         "127.0.0.1:2222", config, None, self,
-//!         |connection| {
-//!           connection.authenticate_key("pe", key)
-//!             .and_then(|session| {
-//!               session.channel_open_session().and_then(|(session, channelid)| {
-//!                 session.data(channelid, None, "Hello, world!").and_then(|(mut session, _)| {
-//!                   session.disconnect(Disconnect::ByApplication, "Ciao", "");
-//!                   session
-//!                 })
-//!               })
-//!         })
-//!       }).unwrap().map_err(|_| ())
-//!     )
-//!  }
-//!}
-//!
-//!fn main() {
-//!    env_logger::init();
-//!    // Starting the server thread.
-//!    let client_key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
-//!    let client_pubkey = Arc::new(client_key.clone_public_key());
-//!    let mut config = thrussh::client::Config::default();
-//!    config.connection_timeout = Some(std::time::Duration::from_secs(600));
-//!    let config = Arc::new(config);
-//!    let sh = Client { key: Arc::new(client_key) };
-//!    sh.run(config, "127.0.0.1:2222");
-//!}
+//!   let key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
+//!   let mut agent = thrussh_keys::agent::client::AgentClient::connect_env().await.unwrap();
+//!   agent.add_identity(&key, &[]).await.unwrap();
+//!   let mut session = thrussh::client::connect(config, "localhost:22", sh).await.unwrap();
+//!   if session.authenticate_future(std::env::var("USER").unwrap(), key.clone_public_key(), agent).await.unwrap().1 {
+//!     let mut channel = session.channel_open_session().await.unwrap();
+//!     channel.data(b"Hello, world!").await.unwrap();
+//!     if let Some(msg) = channel.wait().await {
+//!         println!("{:?}", msg)
+//!     }
+//!   }
+//! }
 //! ```
 //! # Using non-socket IO / writing tunnels
 //!
@@ -285,355 +269,196 @@
 //!
 #[macro_use]
 extern crate bitflags;
-
 #[macro_use]
 extern crate log;
-extern crate byteorder;
-
-extern crate cryptovec;
-
-extern crate hmac;
-extern crate sha2;
-
-extern crate tokio;
-extern crate tokio_io;
-#[macro_use]
-extern crate futures;
-extern crate openssl;
 extern crate thrussh_libsodium as sodium;
-extern crate thrussh_keys;
-
-mod read_exact_from;
+#[macro_use]
+extern crate thiserror;
 
 pub use cryptovec::CryptoVec;
-mod sshbuffer;
-mod ssh_read;
-mod tcp;
+mod auth;
+mod cipher;
+mod compression;
+mod kex;
 mod key;
 mod mac;
+mod msg;
+mod negotiation;
+mod ssh_read;
+mod sshbuffer;
 
-pub use tcp::Tcp;
+pub use negotiation::{Named, Preferred};
+mod pty;
+pub use pty::Pty;
 
 macro_rules! push_packet {
-    ( $buffer:expr, $x:expr ) => {
-        {
-            use byteorder::{BigEndian, ByteOrder};
-            let i0 = $buffer.len();
-            $buffer.extend(b"\0\0\0\0");
-            let x = $x;
-            let i1 = $buffer.len();
-            use std::ops::DerefMut;
-            let buf = $buffer.deref_mut();
-            BigEndian::write_u32(&mut buf[i0..], (i1-i0-4) as u32);
-            x
-        }
-    };
+    ( $buffer:expr, $x:expr ) => {{
+        use byteorder::{BigEndian, ByteOrder};
+        let i0 = $buffer.len();
+        $buffer.extend(b"\0\0\0\0");
+        let x = $x;
+        let i1 = $buffer.len();
+        use std::ops::DerefMut;
+        let buf = $buffer.deref_mut();
+        BigEndian::write_u32(&mut buf[i0..], (i1 - i0 - 4) as u32);
+        x
+    }};
 }
-
 mod session;
 
+/// Server side of this library.
+pub mod server;
 
+/// Client side of this library.
+pub mod client;
 
-#[derive(Clone, Copy)]
-enum Status {
-    Ok,
-    Disconnect,
-}
-
-/// Run one step of the protocol. This trait is currently not used,
-/// but both the client and the server implement it. It was meant to
-/// factor out code in common between client::Data and a former
-/// server::Data.
-///
-/// The reason the server cannot have a useful `Data` future is that
-/// the main interactions between the server and the library user are
-/// through callbacks (whereas the client is mostly used by
-/// manipulating `Connection`s directly).
-trait AtomicPoll<E> {
-    fn atomic_poll(&mut self) -> futures::Poll<Status, E>;
-}
-
-/// Since handlers are large, their associated future types must implement this trait to provide reasonable default implementations (basically, rejecting all requests).
-pub trait FromFinished<T, E>: futures::Future<Item = T, Error = E> {
-    /// Turns type `T` into `Self`, a future yielding `T`.
-    fn finished(t: T) -> Self;
-}
-
-impl<T, E> FromFinished<T, E> for futures::Finished<T, E> {
-    fn finished(t: T) -> Self {
-        futures::finished(t)
-    }
-}
-
-impl<T: 'static, E: 'static> FromFinished<T, E> for Box<dyn futures::Future<Item = T, Error = E>> {
-    fn finished(t: T) -> Self {
-        Box::new(futures::finished(t))
-    }
-}
-
-
-#[derive(Debug)]
-/// Errors.
+#[derive(Debug, Error)]
 pub enum Error {
     /// The key file could not be parsed.
+    #[error("Could not read key")]
     CouldNotReadKey,
 
     /// Unspecified problem with the beginning of key exchange.
+    #[error("Key exchange init failed")]
     KexInit,
 
     /// No common key exchange algorithm.
+    #[error("No common key exchange algorithm")]
     NoCommonKexAlgo,
 
     /// No common signature algorithm.
+    #[error("No common key algorithm")]
     NoCommonKeyAlgo,
 
     /// No common cipher.
+    #[error("No common key cipher")]
     NoCommonCipher,
 
-    /// No common hmac.
-    NoCommonHmac,
+    /// No common compression algorithm.
+    #[error("No common compression algorithm")]
+    NoCommonCompression,
 
     /// Invalid SSH version string.
+    #[error("invalid SSH version string")]
     Version,
 
     /// Error during key exchange.
+    #[error("Key exchange failed")]
     Kex,
 
     /// Invalid packet authentication code.
+    #[error("Wrong packet authentication code")]
     PacketAuth,
 
     /// The protocol is in an inconsistent state.
+    #[error("Inconsistent state of the protocol")]
     Inconsistent,
 
     /// The client is not yet authenticated.
+    #[error("Not yet authenticated")]
     NotAuthenticated,
 
     /// Index out of bounds.
+    #[error("Index out of bounds")]
     IndexOutOfBounds,
 
-    /// UTF-8 decoding error (most probably ASCII error).
-    Utf8(std::str::Utf8Error),
-
     /// Unknown server key.
+    #[error("Unknown server key")]
     UnknownKey,
 
+    /// The server provided a wrong signature.
+    #[error("Wrong server signature")]
+    WrongServerSig,
+
     /// Message received/sent on unopened channel.
+    #[error("Channel not open")]
     WrongChannel,
 
-    /// I/O error.
-    IO(std::io::Error),
-
     /// Disconnected
+    #[error("Disconnected")]
     Disconnect,
 
     /// No home directory found when trying to learn new host key.
+    #[error("No home directory when saving host key")]
     NoHomeDir,
 
     /// Remote key changed, this could mean a man-in-the-middle attack
     /// is being performed on the connection.
-    KeyChanged(usize),
+    #[error("Key changed, line {}", line)]
+    KeyChanged { line: usize },
 
     /// Connection closed by the remote side.
+    #[error("Connection closed by the remote side")]
     HUP,
 
-    /// Error from the cryptography layer.
-    OpenSSL(openssl::error::Error),
-
-    /// Error from the cryptography layer.
-    OpenSSLStack(openssl::error::ErrorStack),
-
-    /// Unit error (sodiumoxide might return that).
-    Unit,
-
     /// Connection timeout.
+    #[error("Connection timeout")]
     ConnectionTimeout,
 
     /// Missing authentication method.
+    #[error("No authentication method")]
     NoAuthMethod,
 
-    /// Keys error
-    Keys(thrussh_keys::Error),
+    #[error("Channel send error")]
+    SendError,
 
-    /// Timer error
-    Timer(tokio::timer::Error),
+    #[error(transparent)]
+    Keys(#[from] thrussh_keys::Error),
+
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Utf8(#[from] std::str::Utf8Error),
+
+    #[error(transparent)]
+    Compress(#[from] flate2::CompressError),
+
+    #[error(transparent)]
+    Decompress(#[from] flate2::DecompressError),
+
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
+
+    #[error(transparent)]
+    Openssl(#[from] openssl::error::ErrorStack),
+
+    #[error(transparent)]
+    Elapsed(#[from] tokio::time::error::Elapsed),
 }
 
-/// Errors including those coming from handler. These are not included
-/// in this crate's "main" error type to allow for a simpler API (the
-/// "handler error" type cannot be inferred by the compiler in some
-/// functions).
-#[derive(Debug)]
-pub enum HandlerError<E> {
-    /// Standard errors
-    Error(Error),
-    /// From handler
-    Handler(E),
+#[derive(Debug, Error)]
+#[error("Could not reach the event loop")]
+pub struct SendError {}
+
+/// Since handlers are large, their associated future types must implement this trait to provide reasonable default implementations (basically, rejecting all requests).
+pub trait FromFinished<T>: futures::Future<Output = Result<T, Error>> {
+    /// Turns type `T` into `Self`, a future yielding `T`.
+    fn finished(t: T) -> Self;
 }
 
-impl<E> std::convert::From<HandlerError<HandlerError<E>>> for HandlerError<E> {
-    fn from(e: HandlerError<HandlerError<E>>) -> Self {
-        match e {
-            HandlerError::Handler(HandlerError::Error(e)) => HandlerError::Error(e),
-            HandlerError::Handler(HandlerError::Handler(e)) => HandlerError::Handler(e),
-            HandlerError::Error(e) => HandlerError::Error(e)
-        }
-    }
-}
-
-use std::error::Error as StdError;
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.description())
-    }
-}
-impl std::error::Error for Error {
-    fn description(&self) -> &str {
-        match *self {
-            Error::Utf8(ref e) => e.description(),
-            Error::IO(ref e) => e.description(),
-            Error::CouldNotReadKey => "Could not read key",
-            Error::KexInit => "KexInit problem",
-            Error::NoCommonKexAlgo => "No common key exchange algorithms were found",
-            Error::NoCommonKeyAlgo => "No common signature algorithms were found",
-            Error::NoCommonCipher => "No common ciphers were found",
-            Error::NoCommonHmac => "No common hmac was found",
-            Error::Kex => "Received invalid key exchange packet",
-            Error::Version => "Invalid version string from the remote side",
-            Error::PacketAuth => "Incorrect packet authentication code",
-            Error::Inconsistent => "Unexpected message",
-            Error::NotAuthenticated => "Not authenticated",
-            Error::IndexOutOfBounds => "Index out of bounds in a packet",
-            Error::UnknownKey => "Unknown host key",
-            Error::WrongChannel => "Inexistent channel",
-            Error::Disconnect => "Disconnected",
-            Error::NoHomeDir => "Home directory not found",
-            Error::KeyChanged(_) => "Server key changed",
-            Error::HUP => "Connection closed by the remote side",
-            Error::ConnectionTimeout => "Connection timout",
-            Error::NoAuthMethod => "No more authentication methods available",
-            Error::OpenSSL(ref e) => e.description(),
-            Error::OpenSSLStack(ref e) => e.description(),
-            Error::Unit => "Unknown (unit) error",
-            Error::Keys(ref e) => e.description(),
-            Error::Timer(ref e) => e.description(),
-        }
-    }
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        match *self {
-            Error::Utf8(ref e) => Some(e),
-            Error::IO(ref e) => Some(e),
-            _ => None,
-        }
+impl<T> FromFinished<T> for futures::future::Ready<Result<T, Error>> {
+    fn finished(t: T) -> Self {
+        futures::future::ready(Ok(t))
     }
 }
 
-impl<E:std::error::Error> std::fmt::Display for HandlerError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.description())
+impl<T: 'static> FromFinished<T> for Box<dyn futures::Future<Output = Result<T, Error>> + Unpin> {
+    fn finished(t: T) -> Self {
+        Box::new(futures::future::ready(Ok(t)))
     }
 }
-impl<E:std::error::Error> std::error::Error for HandlerError<E> {
-    fn description(&self) -> &str {
-        match *self {
-            HandlerError::Error(ref e) => e.description(),
-            HandlerError::Handler(ref e) => e.description(),
-        }
-    }
-    fn cause(&self) -> Option<&dyn std::error::Error> {
-        match *self {
-            HandlerError::Error(ref e) => e.source(),
-            HandlerError::Handler(ref e) => e.source(),
-        }
-    }
-}
-
-
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Error {
-        Error::IO(e)
-    }
-}
-
-impl From<thrussh_keys::Error> for Error {
-    fn from(e: thrussh_keys::Error) -> Error {
-        Error::Keys(e)
-    }
-}
-
-impl From<std::str::Utf8Error> for Error {
-    fn from(e: std::str::Utf8Error) -> Error {
-        Error::Utf8(e)
-    }
-}
-
-impl From<openssl::error::ErrorStack> for Error {
-    fn from(e: openssl::error::ErrorStack) -> Error {
-        Error::OpenSSLStack(e)
-    }
-}
-/*
-impl From<tokio_timer::TimerError> for Error {
-    fn from(e: tokio_timer::TimerError) -> Error {
-        Error::Timer(e)
-    }
-}
-*/
-impl From<()> for Error {
-    fn from(_: ()) -> Error {
-        Error::Unit
-    }
-}
-
-impl<E> From<Error> for HandlerError<E> {
-    fn from(e: Error) -> HandlerError<E> {
-        HandlerError::Error(e)
-    }
-}
-impl<E> From<std::io::Error> for HandlerError<E> {
-    fn from(e: std::io::Error) -> HandlerError<E> {
-        HandlerError::Error(Error::IO(e))
-    }
-}
-
-impl<E> From<std::str::Utf8Error> for HandlerError<E> {
-    fn from(e: std::str::Utf8Error) -> HandlerError<E> {
-        HandlerError::Error(Error::Utf8(e))
-    }
-}
-impl<E> From<thrussh_keys::Error> for HandlerError<E> {
-    fn from(e: thrussh_keys::Error) -> HandlerError<E> {
-        HandlerError::Error(Error::Keys(e))
-    }
-}
-
-impl<E> From<tokio::timer::Error> for HandlerError<E> {
-    fn from(e: tokio::timer::Error) -> HandlerError<E> {
-        HandlerError::Error(Error::Timer(e))
-    }
-}
-
-
-mod negotiation;
-pub use negotiation::{Named, Preferred};
-mod pty;
-pub use pty::Pty;
-mod msg;
-mod kex;
-mod cipher;
 
 // mod mac;
 // use mac::*;
 // mod compression;
 
-mod auth;
-
 /// The number of bytes read/written, and the number of seconds before a key re-exchange is requested.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    rekey_write_limit: usize,
-    rekey_read_limit: usize,
-    rekey_time_limit: std::time::Duration,
+    pub rekey_write_limit: usize,
+    pub rekey_read_limit: usize,
+    pub rekey_time_limit: std::time::Duration,
 }
 
 impl Limits {
@@ -654,22 +479,17 @@ impl Default for Limits {
         // https://tools.ietf.org/html/rfc4253#section-9
         Limits {
             rekey_write_limit: 1 << 30, // 1 Gb
-            rekey_read_limit: 1 << 30, // 1 Gb
+            rekey_read_limit: 1 << 30,  // 1 Gb
             rekey_time_limit: std::time::Duration::from_secs(3600),
         }
     }
 }
 
-pub use auth::MethodSet;
-
-/// Server side of this library.
-pub mod server;
-
-/// Client side of this library.
-pub mod client;
+pub use auth::{AgentAuthError, MethodSet, Signer};
 
 /// A reason for disconnection.
 #[allow(missing_docs)] // This should be relatively self-explanatory.
+#[derive(Debug)]
 pub enum Disconnect {
     HostNotAllowedToConnect = 1,
     ProtocolError = 2,
@@ -695,8 +515,8 @@ pub enum Disconnect {
 /// understand the encoding.
 #[allow(missing_docs)]
 // This should be relatively self-explanatory.
-#[derive(Debug, Clone, Copy)]
-pub enum Sig<'a> {
+#[derive(Debug, Clone)]
+pub enum Sig {
     ABRT,
     ALRM,
     FPE,
@@ -709,11 +529,11 @@ pub enum Sig<'a> {
     SEGV,
     TERM,
     USR1,
-    Custom(&'a str),
+    Custom(String),
 }
 
-impl<'a> Sig<'a> {
-    fn name(&self) -> &'a str {
+impl Sig {
+    fn name(&self) -> &str {
         match *self {
             Sig::ABRT => "ABRT",
             Sig::ALRM => "ALRM",
@@ -727,10 +547,10 @@ impl<'a> Sig<'a> {
             Sig::SEGV => "SEGV",
             Sig::TERM => "TERM",
             Sig::USR1 => "USR1",
-            Sig::Custom(c) => c,
+            Sig::Custom(ref c) => c,
         }
     }
-    fn from_name(name: &'a [u8]) -> Result<Sig, Error> {
+    fn from_name(name: &[u8]) -> Result<Sig, Error> {
         match name {
             b"ABRT" => Ok(Sig::ABRT),
             b"ALRM" => Ok(Sig::ALRM),
@@ -744,11 +564,10 @@ impl<'a> Sig<'a> {
             b"SEGV" => Ok(Sig::SEGV),
             b"TERM" => Ok(Sig::TERM),
             b"USR1" => Ok(Sig::USR1),
-            x => Ok(Sig::Custom(std::str::from_utf8(x)?)),
+            x => Ok(Sig::Custom(std::str::from_utf8(x)?.to_string())),
         }
     }
 }
-
 
 /// Reason for not being able to open a channel.
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -772,7 +591,6 @@ impl ChannelOpenFailure {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// The identifier of a channel.
 pub struct ChannelId(u32);
@@ -789,4 +607,192 @@ pub(crate) struct Channel {
     /// Has the other side confirmed the channel?
     pub confirmed: bool,
     wants_reply: bool,
+    pending_data: std::collections::VecDeque<(CryptoVec, Option<u32>, usize)>,
+}
+
+#[derive(Debug)]
+pub enum ChannelMsg {
+    Data {
+        data: CryptoVec,
+    },
+    ExtendedData {
+        data: CryptoVec,
+        ext: u32,
+    },
+    Eof,
+    Close,
+    XonXoff {
+        client_can_do: bool,
+    },
+    ExitStatus {
+        exit_status: u32,
+    },
+    ExitSignal {
+        signal_name: Sig,
+        core_dumped: bool,
+        error_message: String,
+        lang_tag: String,
+    },
+    WindowAdjusted {
+        new_size: u32,
+    },
+    Success,
+}
+
+#[cfg(test)]
+mod test_compress {
+    use super::server::{Auth, Session};
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn compress_local_test() {
+        test_compress(true).await
+    }
+
+    async fn test_compress(local: bool) {
+        env_logger::try_init().unwrap_or(());
+        let (client_key, addr) = if local {
+            let client_key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
+            let client_pubkey = Arc::new(client_key.clone_public_key());
+            let mut config = super::server::Config::default();
+            config.preferred = super::Preferred::COMPRESSED;
+            config.auth_rejection_time = std::time::Duration::from_secs(0);
+            config.connection_timeout = None; // Some(std::time::Duration::from_secs(3));
+            config.auth_rejection_time = std::time::Duration::from_secs(3);
+            config
+                .keys
+                .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
+            let config = Arc::new(config);
+            let sh = Server {
+                client_pubkey,
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                id: 0,
+            };
+            tokio::spawn(super::server::run(config, "0.0.0.0:2222", sh));
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            (client_key, "127.0.0.1:2222")
+        } else {
+            let client_key = thrussh_keys::load_secret_key("id_ed25519", None).unwrap();
+            (client_key, "127.0.0.1:2222")
+        };
+
+        let mut config = super::client::Config::default();
+        config.preferred = super::Preferred::COMPRESSED;
+        let config = Arc::new(config);
+        let sh = Client {};
+
+        let mut session = super::client::connect(config, addr, sh).await.unwrap();
+        debug!("connected");
+        if session
+            .authenticate_publickey(std::env::var("USER").unwrap(), Arc::new(client_key))
+            .await
+            .unwrap()
+        {
+            debug!("authenticated");
+            if let Ok(mut channel) = session.channel_open_session().await {
+                channel.data(&b"Hello, world!"[..]).await.unwrap();
+                if let Some(msg) = channel.wait().await {
+                    println!("{:?}", msg)
+                }
+            }
+        }
+        if local {
+            std::thread::sleep(std::time::Duration::from_secs(40));
+        }
+    }
+
+    #[derive(Clone)]
+    struct Server {
+        client_pubkey: Arc<thrussh_keys::key::PublicKey>,
+        clients: Arc<Mutex<HashMap<(usize, ChannelId), super::server::Handle>>>,
+        id: usize,
+    }
+
+    impl server::Server for Server {
+        type Handler = Self;
+        fn new(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+            let s = self.clone();
+            self.id += 1;
+            s
+        }
+    }
+
+    impl server::Handler for Server {
+        type Error = super::Error;
+        type FutureAuth = futures::future::Ready<Result<(Self, server::Auth), Self::Error>>;
+        type FutureUnit = futures::future::Ready<Result<(Self, Session), Self::Error>>;
+        type FutureBool = futures::future::Ready<Result<(Self, Session, bool), Self::Error>>;
+
+        fn finished_auth(self, auth: Auth) -> Self::FutureAuth {
+            futures::future::ready(Ok((self, auth)))
+        }
+        fn finished_bool(self, b: bool, s: Session) -> Self::FutureBool {
+            futures::future::ready(Ok((self, s, b)))
+        }
+        fn finished(self, s: Session) -> Self::FutureUnit {
+            futures::future::ready(Ok((self, s)))
+        }
+        fn channel_open_session(self, channel: ChannelId, session: Session) -> Self::FutureUnit {
+            {
+                let mut clients = self.clients.lock().unwrap();
+                clients.insert((self.id, channel), session.handle());
+            }
+            self.finished(session)
+        }
+        fn auth_publickey(self, _: &str, _: &thrussh_keys::key::PublicKey) -> Self::FutureAuth {
+            debug!("auth_publickey");
+            self.finished_auth(server::Auth::Accept)
+        }
+        fn data(self, _channel: ChannelId, data: &[u8], session: Session) -> Self::FutureUnit {
+            debug!("server data = {:?}", std::str::from_utf8(data));
+            self.finished(session)
+        }
+    }
+
+    struct Client {}
+
+    impl client::Handler for Client {
+        type Error = super::Error;
+        type FutureUnit = futures::future::Ready<Result<(Self, client::Session), Self::Error>>;
+        type FutureBool = futures::future::Ready<Result<(Self, bool), Self::Error>>;
+
+        fn finished_bool(self, b: bool) -> Self::FutureBool {
+            futures::future::ready(Ok((self, b)))
+        }
+        fn finished(self, session: client::Session) -> Self::FutureUnit {
+            futures::future::ready(Ok((self, session)))
+        }
+        fn check_server_key(
+            self,
+            server_public_key: &thrussh_keys::key::PublicKey,
+        ) -> Self::FutureBool {
+            println!("check_server_key: {:?}", server_public_key);
+            self.finished_bool(true)
+        }
+        fn channel_open_confirmation(
+            self,
+            channel: ChannelId,
+            _: u32,
+            _: u32,
+            session: client::Session,
+        ) -> Self::FutureUnit {
+            println!("channel_open_confirmation: {:?}", channel);
+            self.finished(session)
+        }
+        fn data(
+            self,
+            channel: ChannelId,
+            data: &[u8],
+            session: client::Session,
+        ) -> Self::FutureUnit {
+            debug!(
+                "client data on channel {:?}: {:?}",
+                channel,
+                std::str::from_utf8(data)
+            );
+            self.finished(session)
+        }
+    }
 }

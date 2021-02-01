@@ -1,6 +1,4 @@
-#![deny(trivial_casts,
-        unstable_features,
-        unused_import_braces)]
+#![deny(trivial_casts, unstable_features, unused_import_braces)]
 //! This crate contains methods to deal with SSH keys, as defined in
 //! crate Thrussh. This includes in particular various functions for
 //! opening key files, deciphering encrypted keys, and dealing with
@@ -13,205 +11,130 @@
 //! (`b"Please sign this", below).
 //!
 //!```
-//! extern crate thrussh_keys;
-//! extern crate futures;
-//! extern crate tempdir;
-//! extern crate tokio_uds;
-//! extern crate tokio;
 //! use thrussh_keys::*;
 //! use futures::Future;
 //!
-//! struct F(bool);
-//! impl std::convert::From<bool> for F {
-//!     fn from(e: bool) -> Self {
-//!         F(e)
-//!     }
-//! }
-//! impl futures::Future for F {
-//!     type Item = bool;
-//!     type Error = Error;
-//!     fn poll(&mut self) -> futures::Poll<Self::Item, Self::Error> {
-//!         Ok(futures::Async::Ready(self.0))
-//!     }
-//! }
 //! #[derive(Clone)]
 //! struct X{}
 //! impl agent::server::Agent for X {
-//!     type F = F;
-//!     fn confirm(&self, pk: &key::KeyPair) -> Self::F {
-//!         F(true)
+//!     fn confirm(&self, _: std::sync::Arc<key::KeyPair>) -> Box<dyn Future<Output = bool> + Send + Unpin> {
+//!         Box::new(futures::future::ready(true))
 //!     }
 //! }
-//!
 //!
 //! const PKCS8_ENCRYPTED: &'static str = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIFLTBXBgkqhkiG9w0BBQ0wSjApBgkqhkiG9w0BBQwwHAQITo1O0b8YrS0CAggA\nMAwGCCqGSIb3DQIJBQAwHQYJYIZIAWUDBAEqBBBtLH4T1KOfo1GGr7salhR8BIIE\n0KN9ednYwcTGSX3hg7fROhTw7JAJ1D4IdT1fsoGeNu2BFuIgF3cthGHe6S5zceI2\nMpkfwvHbsOlDFWMUIAb/VY8/iYxhNmd5J6NStMYRC9NC0fVzOmrJqE1wITqxtORx\nIkzqkgFUbaaiFFQPepsh5CvQfAgGEWV329SsTOKIgyTj97RxfZIKA+TR5J5g2dJY\nj346SvHhSxJ4Jc0asccgMb0HGh9UUDzDSql0OIdbnZW5KzYJPOx+aDqnpbz7UzY/\nP8N0w/pEiGmkdkNyvGsdttcjFpOWlLnLDhtLx8dDwi/sbEYHtpMzsYC9jPn3hnds\nTcotqjoSZ31O6rJD4z18FOQb4iZs3MohwEdDd9XKblTfYKM62aQJWH6cVQcg+1C7\njX9l2wmyK26Tkkl5Qg/qSfzrCveke5muZgZkFwL0GCcgPJ8RixSB4GOdSMa/hAMU\nkvFAtoV2GluIgmSe1pG5cNMhurxM1dPPf4WnD+9hkFFSsMkTAuxDZIdDk3FA8zof\nYhv0ZTfvT6V+vgH3Hv7Tqcxomy5Qr3tj5vvAqqDU6k7fC4FvkxDh2mG5ovWvc4Nb\nXv8sed0LGpYitIOMldu6650LoZAqJVv5N4cAA2Edqldf7S2Iz1QnA/usXkQd4tLa\nZ80+sDNv9eCVkfaJ6kOVLk/ghLdXWJYRLenfQZtVUXrPkaPpNXgD0dlaTN8KuvML\nUw/UGa+4ybnPsdVflI0YkJKbxouhp4iB4S5ACAwqHVmsH5GRnujf10qLoS7RjDAl\no/wSHxdT9BECp7TT8ID65u2mlJvH13iJbktPczGXt07nBiBse6OxsClfBtHkRLzE\nQF6UMEXsJnIIMRfrZQnduC8FUOkfPOSXc8r9SeZ3GhfbV/DmWZvFPCpjzKYPsM5+\nN8Bw/iZ7NIH4xzNOgwdp5BzjH9hRtCt4sUKVVlWfEDtTnkHNOusQGKu7HkBF87YZ\nRN/Nd3gvHob668JOcGchcOzcsqsgzhGMD8+G9T9oZkFCYtwUXQU2XjMN0R4VtQgZ\nrAxWyQau9xXMGyDC67gQ5xSn+oqMK0HmoW8jh2LG/cUowHFAkUxdzGadnjGhMOI2\nzwNJPIjF93eDF/+zW5E1l0iGdiYyHkJbWSvcCuvTwma9FIDB45vOh5mSR+YjjSM5\nnq3THSWNi7Cxqz12Q1+i9pz92T2myYKBBtu1WDh+2KOn5DUkfEadY5SsIu/Rb7ub\n5FBihk2RN3y/iZk+36I69HgGg1OElYjps3D+A9AjVby10zxxLAz8U28YqJZm4wA/\nT0HLxBiVw+rsHmLP79KvsT2+b4Diqih+VTXouPWC/W+lELYKSlqnJCat77IxgM9e\nYIhzD47OgWl33GJ/R10+RDoDvY4koYE+V5NLglEhbwjloo9Ryv5ywBJNS7mfXMsK\n/uf+l2AscZTZ1mhtL38efTQCIRjyFHc3V31DI0UdETADi+/Omz+bXu0D5VvX+7c6\nb1iVZKpJw8KUjzeUV8yOZhvGu3LrQbhkTPVYL555iP1KN0Eya88ra+FUKMwLgjYr\nJkUx4iad4dTsGPodwEP/Y9oX/Qk3ZQr+REZ8lg6IBoKKqqrQeBJ9gkm1jfKE6Xkc\nCog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux\n-----END ENCRYPTED PRIVATE KEY-----\n";
 //!
 //! fn main() {
-//!     let dir = tempdir::TempDir::new("thrussh").unwrap();
-//!     let agent_path = dir.path().join("agent");
+//!    env_logger::try_init().unwrap_or(());
+//!    let dir = tempdir::TempDir::new("thrussh").unwrap();
+//!    let agent_path = dir.path().join("agent");
 //!
-//!     let mut core = tokio::runtime::Runtime::new().unwrap();
-//!     let listener = tokio_uds::UnixListener::bind(&agent_path).unwrap().incoming();
-//!
-//!     core.spawn(
-//!         agent::server::AgentServer::new(listener, X{})
-//!             .map_err(|e| println!("{:?}", e))
-//!     );
-//!
-//!     let key = decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
-//!     let public = key.clone_public_key();
-//!     core.block_on(
-//!         tokio_uds::UnixStream::connect(&agent_path).from_err().and_then(move |stream| {
-//!             agent::client::AgentClient::connect(stream)
-//!                 .add_identity(&key, &[agent::Constraint::KeyLifetime { seconds: 60 }]).and_then(move |(client, _)| {
-//!                     client.request_identities().and_then(move |(client, id)| {
-//!                         client.sign_request(&public, b"Please sign this").and_then(|(_, sig)| {
-//!                             let sig = sig.unwrap();
-//!                             futures::finished(())
-//!                         })
-//!                     })
-//!                 })
-//!         })
-//!     ).unwrap();
+//!    let mut core = tokio::runtime::Runtime::new().unwrap();
+//!    let agent_path_ = agent_path.clone();
+//!    // Starting a server
+//!    core.spawn(async move {
+//!        let mut listener = tokio::net::UnixListener::bind(&agent_path_)
+//!            .unwrap();
+//!        thrussh_keys::agent::server::serve(listener.incoming(), X {}).await
+//!    });
+//!    let key = decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
+//!    let public = key.clone_public_key();
+//!    core.block_on(async move {
+//!        let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+//!        let mut client = agent::client::AgentClient::connect(stream);
+//!        client.add_identity(&key, &[agent::Constraint::KeyLifetime { seconds: 60 }]).await?;
+//!        client.request_identities().await?;
+//!        let buf = b"signed message";
+//!        let sig = client.sign_request(&public, buf).await?.unwrap();
+//!        assert!(public.verify_detached(buf, sig.as_ref()));
+//!        Ok::<(), Error>(())
+//!    }).unwrap()
 //! }
 //!```
 
-
-
-#![recursion_limit="128"]
-extern crate base64;
-extern crate hex;
-extern crate byteorder;
-extern crate yasna;
-extern crate tokio;
-extern crate futures;
-extern crate cryptovec;
-extern crate num_bigint;
-extern crate num_integer;
-extern crate bit_vec;
-extern crate openssl;
+#![recursion_limit = "128"]
 extern crate thrussh_libsodium as sodium;
-#[cfg(test)]
-extern crate tokio_uds;
 #[macro_use]
 extern crate serde_derive;
-#[cfg(test)]
+#[macro_use]
+extern crate thiserror;
 #[macro_use]
 extern crate log;
-extern crate serde;
-extern crate dirs;
+
 #[cfg(test)]
 extern crate env_logger;
 
-use base64::{decode_config, encode_config, MIME};
-use std::path::Path;
+use byteorder::{BigEndian, WriteBytesExt};
+use data_encoding::BASE64_MIME;
 use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufRead, Read, Write, Seek, SeekFrom};
-use byteorder::{BigEndian, WriteBytesExt};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
+pub mod encoding;
 pub mod key;
 pub mod signature;
-pub mod encoding;
 
-mod blowfish;
 mod bcrypt_pbkdf;
+mod blowfish;
 mod format;
 pub use format::*;
 
 /// A module to write SSH agent.
 pub mod agent;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    IO(std::io::Error),
-    Utf8(std::str::Utf8Error),
-    OpenSSL(openssl::error::Error),
-    OpenSSLStack(openssl::error::ErrorStack),
-    Base64(base64::DecodeError),
-    Hex(hex::FromHexError),
-    Yasna(yasna::ASN1Error),
-    TokioSpawn(tokio::executor::SpawnError),
-    /// Unknown error
-    Unit,
     /// The key could not be read, for an unknown reason
+    #[error("Could not read key")]
     CouldNotReadKey,
     /// The type of the key is unsupported
+    #[error("Unsupported key type")]
     UnsupportedKeyType(Vec<u8>),
     /// The key is encrypted (should supply a password?)
+    #[error("The key is encrypted")]
     KeyIsEncrypted,
     /// Home directory could not be found
+    #[error("No home directory found")]
     NoHomeDir,
     /// The server key has changed
-    KeyChanged(usize),
+    #[error("The server key changed at line {}", line)]
+    KeyChanged { line: usize },
     /// The key uses an unsupported algorithm
+    #[error("Unknown key algorithm")]
     UnknownAlgorithm(yasna::models::ObjectIdentifier),
-    /// Lock poisoning error
-    Poison,
     /// Index out of bounds
+    #[error("Index out of bounds")]
     IndexOutOfBounds,
-}
-
-type Result<A> = std::result::Result<A, Error>;
-
-impl std::error::Error for Error {}
-
-impl std::convert::From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::IO(e)
-    }
-}
-
-impl std::convert::From<openssl::error::Error> for Error {
-    fn from(e: openssl::error::Error) -> Self {
-        Error::OpenSSL(e)
-    }
-}
-
-impl std::convert::From<openssl::error::ErrorStack> for Error {
-    fn from(e: openssl::error::ErrorStack) -> Self {
-        Error::OpenSSLStack(e)
-    }
-}
-
-impl std::convert::From<yasna::ASN1Error> for Error {
-    fn from(e: yasna::ASN1Error) -> Self {
-        Error::Yasna(e)
-    }
-}
-
-impl std::convert::From<tokio::executor::SpawnError> for Error {
-    fn from(e: tokio::executor::SpawnError) -> Self {
-        Error::TokioSpawn(e)
-    }
-}
-
-impl std::convert::From<base64::DecodeError> for Error {
-    fn from(e: base64::DecodeError) -> Self {
-        Error::Base64(e)
-    }
-}
-
-impl std::convert::From<hex::FromHexError> for Error {
-    fn from(e: hex::FromHexError) -> Self {
-        Error::Hex(e)
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(fmt, "{:?}", self)
-    }
+    /// Unknown signature type
+    #[error("Unknown signature type: {}", sig_type)]
+    UnknownSignatureType { sig_type: String },
+    /// Agent protocol error
+    #[error("Agent protocol error")]
+    AgentProtocolError,
+    #[error("Agent failure")]
+    AgentFailure,
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    Openssl(#[from] openssl::error::ErrorStack),
+    #[error("Base64 decoding error: {0}")]
+    Decode(#[from] data_encoding::DecodeError),
+    #[error("ASN1 decoding error: {0}")]
+    ASN1(#[from] yasna::ASN1Error),
+    #[error("Environment variable not found")]
+    EnvVar(&'static str),
 }
 
 const KEYTYPE_ED25519: &'static [u8] = b"ssh-ed25519";
+const KEYTYPE_RSA: &'static [u8] = b"ssh-rsa";
 
 /// Load a public key from a file. Ed25519 and RSA keys are supported.
 ///
 /// ```
 /// thrussh_keys::load_public_key("/home/pe/.ssh/id_ed25519.pub").unwrap();
 /// ```
-pub fn load_public_key<P:AsRef<Path>>(path: P) -> Result<key::PublicKey> {
+pub fn load_public_key<P: AsRef<Path>>(path: P) -> Result<key::PublicKey, Error> {
     let mut pubkey = String::new();
     let mut file = File::open(path.as_ref())?;
     file.read_to_string(&mut pubkey)?;
@@ -220,7 +143,7 @@ pub fn load_public_key<P:AsRef<Path>>(path: P) -> Result<key::PublicKey> {
     match (split.next(), split.next()) {
         (Some(_), Some(key)) => parse_public_key_base64(key),
         (Some(key), None) => parse_public_key_base64(key),
-        _ => Err(Error::CouldNotReadKey),
+        _ => Err(Error::CouldNotReadKey.into()),
     }
 }
 
@@ -231,48 +154,55 @@ pub fn load_public_key<P:AsRef<Path>>(path: P) -> Result<key::PublicKey> {
 /// ```
 /// thrussh_keys::parse_public_key_base64("AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ").is_ok();
 /// ```
-pub fn parse_public_key_base64(key: &str) -> Result<key::PublicKey> {
-    let base = decode_config(key, MIME)?;
+pub fn parse_public_key_base64(key: &str) -> Result<key::PublicKey, Error> {
+    let base = BASE64_MIME.decode(key.as_bytes())?;
     Ok(key::parse_public_key(&base)?)
 }
 
 pub trait PublicKeyBase64 {
     /// Create the base64 part of the public key blob.
-    fn public_key_base64(&self) -> String;
+    fn public_key_bytes(&self) -> Vec<u8>;
+    fn public_key_base64(&self) -> String {
+        BASE64_MIME.encode(&self.public_key_bytes())
+    }
 }
 
 impl PublicKeyBase64 for key::PublicKey {
-    fn public_key_base64(&self) -> String {
-        let name = self.name().as_bytes();
-        let mut s = cryptovec::CryptoVec::new();
-        s.write_u32::<BigEndian>(name.len() as u32).unwrap();
-        s.extend(name);
+    fn public_key_bytes(&self) -> Vec<u8> {
+        let mut s = Vec::new();
         match *self {
             key::PublicKey::Ed25519(ref publickey) => {
-                s.write_u32::<BigEndian>(publickey.key.len() as u32).unwrap();
-                s.extend(&publickey.key);
+                let name = b"ssh-ed25519";
+                s.write_u32::<BigEndian>(name.len() as u32).unwrap();
+                s.extend_from_slice(name);
+                s.write_u32::<BigEndian>(publickey.key.len() as u32)
+                    .unwrap();
+                s.extend_from_slice(&publickey.key);
             }
             key::PublicKey::RSA { ref key, .. } => {
                 use encoding::Encoding;
+                let name = b"ssh-rsa";
+                s.write_u32::<BigEndian>(name.len() as u32).unwrap();
+                s.extend_from_slice(name);
                 s.extend_ssh_mpint(&key.0.rsa().unwrap().e().to_vec());
                 s.extend_ssh_mpint(&key.0.rsa().unwrap().n().to_vec());
             }
         }
-        encode_config(&s, MIME)
+        s
     }
 }
 
 impl PublicKeyBase64 for key::KeyPair {
-    fn public_key_base64(&self) -> String {
+    fn public_key_bytes(&self) -> Vec<u8> {
         let name = self.name().as_bytes();
-        let mut s = cryptovec::CryptoVec::new();
+        let mut s = Vec::new();
         s.write_u32::<BigEndian>(name.len() as u32).unwrap();
-        s.extend(name);
+        s.extend_from_slice(name);
         match *self {
             key::KeyPair::Ed25519(ref key) => {
-                let public = &key.key[32.. ];
+                let public = &key.key[32..];
                 s.write_u32::<BigEndian>(32).unwrap();
-                s.extend(&public);
+                s.extend_from_slice(&public);
             }
             key::KeyPair::RSA { ref key, .. } => {
                 use encoding::Encoding;
@@ -280,12 +210,15 @@ impl PublicKeyBase64 for key::KeyPair {
                 s.extend_ssh_mpint(&key.n().to_vec());
             }
         }
-        encode_config(&s, MIME)
+        s
     }
 }
 
 /// Write a public key onto the provided `Write`, encoded in base-64.
-pub fn write_public_key_base64<W:Write>(mut w:W, publickey:&key::PublicKey) -> Result<()> {
+pub fn write_public_key_base64<W: Write>(
+    mut w: W,
+    publickey: &key::PublicKey,
+) -> Result<(), Error> {
     let name = publickey.name().as_bytes();
     w.write_all(name)?;
     w.write_all(b" ")?;
@@ -293,9 +226,11 @@ pub fn write_public_key_base64<W:Write>(mut w:W, publickey:&key::PublicKey) -> R
     Ok(())
 }
 
-
 /// Load a secret key, deciphering it with the supplied password if necessary.
-pub fn load_secret_key<P:AsRef<Path>>(secret_: P, password: Option<&[u8]>) -> Result<key::KeyPair> {
+pub fn load_secret_key<P: AsRef<Path>>(
+    secret_: P,
+    password: Option<&[u8]>,
+) -> Result<key::KeyPair, Error> {
     let mut secret_file = std::fs::File::open(secret_)?;
     let mut secret = String::new();
     secret_file.read_to_string(&mut secret)?;
@@ -306,13 +241,18 @@ fn is_base64_char(c: char) -> bool {
     (c >= 'a' && c <= 'z')
         || (c >= 'A' && c <= 'Z')
         || (c >= '0' && c <= '9')
-        || c == '/' || c == '+' || c == '='
+        || c == '/'
+        || c == '+'
+        || c == '='
 }
 
-
 /// Record a host's public key into a nonstandard location.
-pub fn learn_known_hosts_path<P:AsRef<Path>>(host:&str, port:u16, pubkey:&key::PublicKey, path:P) -> Result<()> {
-
+pub fn learn_known_hosts_path<P: AsRef<Path>>(
+    host: &str,
+    port: u16,
+    pubkey: &key::PublicKey,
+    path: P,
+) -> Result<(), Error> {
     if let Some(parent) = path.as_ref().parent() {
         std::fs::create_dir_all(parent)?
     }
@@ -323,7 +263,7 @@ pub fn learn_known_hosts_path<P:AsRef<Path>>(host:&str, port:u16, pubkey:&key::P
         .open(path)?;
 
     // Test whether the known_hosts file ends with a \n
-    let mut buf = [0;1];
+    let mut buf = [0; 1];
     let mut ends_in_newline = false;
     if file.seek(SeekFrom::End(-1)).is_ok() {
         file.read_exact(&mut buf)?;
@@ -347,15 +287,16 @@ pub fn learn_known_hosts_path<P:AsRef<Path>>(host:&str, port:u16, pubkey:&key::P
 }
 
 /// Check that a server key matches the one recorded in file `path`.
-pub fn check_known_hosts_path<P: AsRef<Path>>(host: &str,
-                                              port: u16,
-                                              pubkey: &key::PublicKey,
-                                              path: P)
-                                              -> Result<bool> {
+pub fn check_known_hosts_path<P: AsRef<Path>>(
+    host: &str,
+    port: u16,
+    pubkey: &key::PublicKey,
+    path: P,
+) -> Result<bool, Error> {
     let mut f = if let Ok(f) = File::open(path) {
         BufReader::new(f)
     } else {
-        return Ok(false)
+        return Ok(false);
     };
     let mut buffer = String::new();
 
@@ -371,21 +312,22 @@ pub fn check_known_hosts_path<P: AsRef<Path>>(host: &str,
                 buffer.clear();
                 continue;
             }
+            debug!("line = {:?}", buffer);
             let mut s = buffer.split(' ');
             let hosts = s.next();
             let _ = s.next();
             let key = s.next();
             match (hosts, key) {
                 (Some(h), Some(k)) => {
+                    debug!("{:?} {:?}", h, k);
                     let host_matches = h.split(',').any(|x| x == host_port);
                     if host_matches {
                         if &parse_public_key_base64(k)? == pubkey {
                             return Ok(true);
                         } else {
-                            return Err(Error::KeyChanged(line));
+                            return Err((Error::KeyChanged { line }).into());
                         }
                     }
-
                 }
                 _ => {}
             }
@@ -396,10 +338,9 @@ pub fn check_known_hosts_path<P: AsRef<Path>>(host: &str,
     Ok(false)
 }
 
-
 /// Record a host's public key into the user's known_hosts file.
 #[cfg(target_os = "windows")]
-pub fn learn_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<()> {
+pub fn learn_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<(), Error> {
     if let Some(mut known_host_file) = dirs::home_dir() {
         known_host_file.push("ssh");
         known_host_file.push("known_hosts");
@@ -411,7 +352,7 @@ pub fn learn_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Resu
 
 /// Record a host's public key into the user's known_hosts file.
 #[cfg(not(target_os = "windows"))]
-pub fn learn_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<()> {
+pub fn learn_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<(), Error> {
     if let Some(mut known_host_file) = dirs::home_dir() {
         known_host_file.push(".ssh");
         known_host_file.push("known_hosts");
@@ -423,37 +364,35 @@ pub fn learn_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Resu
 
 /// Check whether the host is known, from its standard location.
 #[cfg(target_os = "windows")]
-pub fn check_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<bool> {
+pub fn check_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<bool, Error> {
     if let Some(mut known_host_file) = dirs::home_dir() {
         known_host_file.push("ssh");
         known_host_file.push("known_hosts");
         check_known_hosts_path(host, port, pubkey, &known_host_file)
     } else {
-        Err(Error::NoHomeDir)
+        Err(Error::NoHomeDir.into())
     }
 }
 
 /// Check whether the host is known, from its standard location.
 #[cfg(not(target_os = "windows"))]
-pub fn check_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<bool> {
+pub fn check_known_hosts(host: &str, port: u16, pubkey: &key::PublicKey) -> Result<bool, Error> {
     if let Some(mut known_host_file) = dirs::home_dir() {
         known_host_file.push(".ssh");
         known_host_file.push("known_hosts");
         check_known_hosts_path(host, port, pubkey, &known_host_file)
     } else {
-        Err(Error::NoHomeDir)
+        Err(Error::NoHomeDir.into())
     }
 }
-
 
 #[cfg(test)]
 mod test {
     extern crate tempdir;
+    use super::*;
+    use futures::Future;
     use std::fs::File;
     use std::io::Write;
-    use futures::Future;
-    use super::*;
-
 
     const ED25519_KEY: &'static str = "-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jYmMAAAAGYmNyeXB0AAAAGAAAABDLGyfA39
@@ -495,20 +434,32 @@ QR+u0AypRPmzHnOPAAAAEXJvb3RAMTQwOTExNTQ5NDBkAQ==
     #[test]
     fn test_decode_ed25519_secret_key() {
         extern crate env_logger;
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         decode_secret_key(ED25519_KEY, Some(b"blabla")).unwrap();
     }
 
     #[test]
     fn test_decode_rsa_secret_key() {
         extern crate env_logger;
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         decode_secret_key(RSA_KEY, None).unwrap();
     }
 
     #[test]
+    fn test_fingerprint() {
+        let key = parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAILagOJFgwaMNhBWQINinKOXmqS4Gh5NgxgriXwdOoINJ",
+        )
+        .unwrap();
+        assert_eq!(
+            key.fingerprint(),
+            "ldyiXa1JQakitNU5tErauu8DvWQ1dZ7aXu+rm7KQuog"
+        );
+    }
+
+    #[test]
     fn test_check_known_hosts() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         let dir = tempdir::TempDir::new("thrussh").unwrap();
         let path = dir.path().join("known_hosts");
         {
@@ -519,28 +470,42 @@ QR+u0AypRPmzHnOPAAAAEXJvb3RAMTQwOTExNTQ5NDBkAQ==
         // Valid key, non-standard port.
         let host = "localhost";
         let port = 13265;
-        let hostkey = parse_public_key_base64("AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ")
-            .unwrap();
+        let hostkey = parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
+        )
+        .unwrap();
         assert!(check_known_hosts_path(host, port, &hostkey, &path).unwrap());
 
         // Valid key, several hosts, port 22
         let host = "pijul.org";
         let port = 22;
-        let hostkey = parse_public_key_base64("AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X")
-            .unwrap();
+        let hostkey = parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G1sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X",
+        )
+        .unwrap();
         assert!(check_known_hosts_path(host, port, &hostkey, &path).unwrap());
 
         // Now with the key in a comment above, check that it's not recognized
         let host = "pijul.org";
         let port = 22;
-        let hostkey = parse_public_key_base64("AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G2sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X")
-            .unwrap();
+        let hostkey = parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G2sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X",
+        )
+        .unwrap();
         assert!(check_known_hosts_path(host, port, &hostkey, &path).is_err());
     }
 
     #[test]
+    fn test_srhb() {
+        env_logger::try_init().unwrap_or(());
+        let key = "AAAAB3NzaC1yc2EAAAADAQABAAACAQC0Xtz3tSNgbUQAXem4d+d6hMx7S8Nwm/DOO2AWyWCru+n/+jQ7wz2b5+3oG2+7GbWZNGj8HCc6wJSA3jUsgv1N6PImIWclD14qvoqY3Dea1J0CJgXnnM1xKzBz9C6pDHGvdtySg+yzEO41Xt4u7HFn4Zx5SGuI2NBsF5mtMLZXSi33jCIWVIkrJVd7sZaY8jiqeVZBB/UvkLPWewGVuSXZHT84pNw4+S0Rh6P6zdNutK+JbeuO+5Bav4h9iw4t2sdRkEiWg/AdMoSKmo97Gigq2mKdW12ivnXxz3VfxrCgYJj9WwaUUWSfnAju5SiNly0cTEAN4dJ7yB0mfLKope1kRhPsNaOuUmMUqlu/hBDM/luOCzNjyVJ+0LLB7SV5vOiV7xkVd4KbEGKou8eeCR3yjFazUe/D1pjYPssPL8cJhTSuMc+/UC9zD8yeEZhB9V+vW4NMUR+lh5+XeOzenl65lWYd/nBZXLBbpUMf1AOfbz65xluwCxr2D2lj46iApSIpvE63i3LzFkbGl9GdUiuZJLMFJzOWdhGGc97cB5OVyf8umZLqMHjaImxHEHrnPh1MOVpv87HYJtSBEsN4/omINCMZrk++CRYAIRKRpPKFWV7NQHcvw3m7XLR3KaTYe+0/MINIZwGdou9fLUU3zSd521vDjA/weasH0CyDHq7sZw==";
+
+        parse_public_key_base64(key).unwrap();
+    }
+
+    #[test]
     fn test_nikao() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         let key = "-----BEGIN RSA PRIVATE KEY-----
 MIIEpQIBAAKCAQEAw/FG8YLVoXhsUVZcWaY7iZekMxQ2TAfSVh0LTnRuzsumeLhb
 0fh4scIt4C4MLwpGe/u3vj290C28jLkOtysqnIpB4iBUrFNRmEz2YuvjOzkFE8Ju
@@ -603,7 +568,7 @@ xV/JrzLAwPoKk3bkqys3bUmgo6DxVC/6RmMwPQ0rmpw78kOgEej90g==
 
     #[test]
     fn test_loewenheim() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         let key = "-----BEGIN RSA PRIVATE KEY-----
 Proc-Type: 4,ENCRYPTED
 DEK-Info: AES-128-CBC,80E4FCAD049EE007CCE1C65D52CDB87A
@@ -635,13 +600,16 @@ raMODVc+NiJE0Qe6bwAi4HSpJ0qw2lKwVHYB8cdnNVv13acApod326/9itdbb3lt
 KJaj7gc0n6gmKY6r0/Ddufy1JZ6eihBCSJ64RARBXeg2rZpyT+xxhMEZLK5meOeR
 -----END RSA PRIVATE KEY-----
 ";
-        decode_secret_key(key, Some(b"passphrase")).unwrap();
+        let key = decode_secret_key(key, Some(b"passphrase")).unwrap();
+        let public = key.clone_public_key();
+        let buf = b"blabla";
+        let sig = key.sign_detached(buf).unwrap();
+        assert!(public.verify_detached(buf, sig.as_ref()));
     }
-
 
     #[test]
     fn test_o01eg() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
 
         let key = "-----BEGIN RSA PRIVATE KEY-----
 Proc-Type: 4,ENCRYPTED
@@ -678,7 +646,7 @@ br8gXU8KyiY9sZVbmplRPF+ar462zcI2kt0a18mr0vbrdqp2eMjb37QDbVBJ+rPE
     }
     #[test]
     fn test_pkcs8() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         println!("test");
         decode_secret_key(PKCS8_RSA, Some(b"blabla")).unwrap();
     }
@@ -715,41 +683,74 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
 -----END ENCRYPTED PRIVATE KEY-----";
 
     #[test]
+    fn test_gpg() {
+        env_logger::try_init().unwrap_or(());
+        let algo = [115, 115, 104, 45, 114, 115, 97];
+        let key = [
+            0, 0, 0, 7, 115, 115, 104, 45, 114, 115, 97, 0, 0, 0, 3, 1, 0, 1, 0, 0, 1, 129, 0, 163,
+            72, 59, 242, 4, 248, 139, 217, 57, 126, 18, 195, 170, 3, 94, 154, 9, 150, 89, 171, 236,
+            192, 178, 185, 149, 73, 210, 121, 95, 126, 225, 209, 199, 208, 89, 130, 175, 229, 163,
+            102, 176, 155, 69, 199, 155, 71, 214, 170, 61, 202, 2, 207, 66, 198, 147, 65, 10, 176,
+            20, 105, 197, 133, 101, 126, 193, 252, 245, 254, 182, 14, 250, 118, 113, 18, 220, 38,
+            220, 75, 247, 50, 163, 39, 2, 61, 62, 28, 79, 199, 238, 189, 33, 194, 190, 22, 87, 91,
+            1, 215, 115, 99, 138, 124, 197, 127, 237, 228, 170, 42, 25, 117, 1, 106, 36, 54, 163,
+            163, 207, 129, 133, 133, 28, 185, 170, 217, 12, 37, 113, 181, 182, 180, 178, 23, 198,
+            233, 31, 214, 226, 114, 146, 74, 205, 177, 82, 232, 238, 165, 44, 5, 250, 150, 236, 45,
+            30, 189, 254, 118, 55, 154, 21, 20, 184, 235, 223, 5, 20, 132, 249, 147, 179, 88, 146,
+            6, 100, 229, 200, 221, 157, 135, 203, 57, 204, 43, 27, 58, 85, 54, 219, 138, 18, 37,
+            80, 106, 182, 95, 124, 140, 90, 29, 48, 193, 112, 19, 53, 84, 201, 153, 52, 249, 15,
+            41, 5, 11, 147, 18, 8, 27, 31, 114, 45, 224, 118, 111, 176, 86, 88, 23, 150, 184, 252,
+            128, 52, 228, 90, 30, 34, 135, 234, 123, 28, 239, 90, 202, 239, 188, 175, 8, 141, 80,
+            59, 194, 80, 43, 205, 34, 137, 45, 140, 244, 181, 182, 229, 247, 94, 216, 115, 173,
+            107, 184, 170, 102, 78, 249, 4, 186, 234, 169, 148, 98, 128, 33, 115, 232, 126, 84, 76,
+            222, 145, 90, 58, 1, 4, 163, 243, 93, 215, 154, 205, 152, 178, 109, 241, 197, 82, 148,
+            222, 78, 44, 193, 248, 212, 157, 118, 217, 75, 211, 23, 229, 121, 28, 180, 208, 173,
+            204, 14, 111, 226, 25, 163, 220, 95, 78, 175, 189, 168, 67, 159, 179, 176, 200, 150,
+            202, 248, 174, 109, 25, 89, 176, 220, 226, 208, 187, 84, 169, 157, 14, 88, 217, 221,
+            117, 254, 51, 45, 93, 184, 80, 225, 158, 29, 76, 38, 69, 72, 71, 76, 50, 191, 210, 95,
+            152, 175, 26, 207, 91, 7,
+        ];
+        debug!("algo = {:?}", std::str::from_utf8(&algo));
+        key::PublicKey::parse(&algo, &key).unwrap();
+    }
+
+    #[test]
     fn test_pkcs8_encrypted() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         println!("test");
         decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
     }
 
     fn test_client_agent(key: key::KeyPair) {
-        env_logger::init();
-        use std::process::Command;
+        env_logger::try_init().unwrap_or(());
+        use std::process::{Command, Stdio};
         let dir = tempdir::TempDir::new("thrussh").unwrap();
         let agent_path = dir.path().join("agent");
         let mut agent = Command::new("ssh-agent")
             .arg("-a")
             .arg(&agent_path)
-            .arg("-d")
+            .arg("-D")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .expect("failed to execute process");
-
         std::thread::sleep(std::time::Duration::from_millis(10));
-        tokio::run(futures::lazy(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async move {
             let public = key.clone_public_key();
-            tokio_uds::UnixStream::connect(&agent_path).from_err().and_then(move |stream| {
-                agent::client::AgentClient::connect(stream)
-                    .add_identity(&key, &[])
-                    .and_then(move |(client, _)| {
-                        debug!("connected");
-                        client.request_identities().and_then(move |(client, _)| {
-                            client.sign_request(&public, b"blabla").and_then(|(_, sig)| {
-                                sig.unwrap();
-                                futures::finished(())
-                            })
-                        })
-                    })
-            }).map_err(|_| ())
-        }));
+            let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+            let mut client = agent::client::AgentClient::connect(stream);
+            client.add_identity(&key, &[]).await?;
+            client.request_identities().await?;
+            let buf = cryptovec::CryptoVec::from_slice(b"blabla");
+            let len = buf.len();
+            let (_, buf) = client.sign_request(&public, buf).await;
+            let buf = buf?;
+            let (a, b) = buf.split_at(len);
+            assert!(public.verify_detached(a, b));
+            Ok::<(), Error>(())
+        })
+        .unwrap();
         agent.kill().unwrap();
         agent.wait().unwrap();
     }
@@ -774,57 +775,67 @@ Cog3JMeTrb3LiPHgN6gU2P30MRp6L1j1J/MtlOAr5rux
 
     #[test]
     fn test_agent() {
-        env_logger::init();
+        env_logger::try_init().unwrap_or(());
         let dir = tempdir::TempDir::new("thrussh").unwrap();
         let agent_path = dir.path().join("agent");
 
-        let mut core = tokio::runtime::Runtime::new().unwrap();
+        let core = tokio::runtime::Runtime::new().unwrap();
         use agent;
-        let listener = tokio_uds::UnixListener::bind(&agent_path).unwrap().incoming();
 
-        struct F(bool);
-        impl std::convert::From<bool> for F {
-            fn from(e: bool) -> Self {
-                F(e)
-            }
-        }
-        impl futures::Future for F {
-            type Item = bool;
-            type Error = Error;
-            fn poll(&mut self) -> futures::Poll<Self::Item, Self::Error> {
-                Ok(futures::Async::Ready(self.0))
-            }
-        }
         #[derive(Clone)]
-        struct X{}
+        struct X {}
         impl agent::server::Agent for X {
-            type F = F;
-            fn confirm(&self, _: &key::KeyPair) -> Self::F {
-                F(true)
+            fn confirm(
+                self,
+                _: std::sync::Arc<key::KeyPair>,
+            ) -> Box<dyn Future<Output = (Self, bool)> + Send + Unpin> {
+                Box::new(futures::future::ready((self, true)))
             }
         }
+        let agent_path_ = agent_path.clone();
+        core.spawn(async move {
+            let mut listener = tokio::net::UnixListener::bind(&agent_path_).unwrap();
 
-        core.spawn(
-            agent::server::AgentServer::new(listener, X{})
-                .map_err(|e| error!("{:?}", e))
-        );
-
+            agent::server::serve(
+                Incoming {
+                    listener: &mut listener,
+                },
+                X {},
+            )
+            .await
+        });
         let key = decode_secret_key(PKCS8_ENCRYPTED, Some(b"blabla")).unwrap();
         let public = key.clone_public_key();
-        core.block_on(
-            tokio_uds::UnixStream::connect(&agent_path).from_err().and_then(move |stream| {
-                agent::client::AgentClient::connect(stream)
-                    .add_identity(&key, &[agent::Constraint::KeyLifetime { seconds: 60 }]).and_then(move |(client, _)| {
-                        client.request_identities().and_then(move |(client, _)| {
-                            client.sign_request(&public, b"blabla").and_then(|(_, sig)| {
-                                let sig = sig.unwrap();
-                                println!("sig = {:?}", sig);
-                                futures::finished(())
-                            })
-                        })
-                    })
-            })
-        ).unwrap();
+        core.block_on(async move {
+            let stream = tokio::net::UnixStream::connect(&agent_path).await?;
+            let mut client = agent::client::AgentClient::connect(stream);
+            client
+                .add_identity(&key, &[agent::Constraint::KeyLifetime { seconds: 60 }])
+                .await?;
+            client.request_identities().await?;
+            let buf = cryptovec::CryptoVec::from_slice(b"blabla");
+            let len = buf.len();
+            let (_, buf) = client.sign_request(&public, buf).await;
+            let buf = buf?;
+            let (a, b) = buf.split_at(len);
+            assert!(public.verify_detached(a, b));
+            Ok::<(), Error>(())
+        })
+        .unwrap()
     }
 
+    struct Incoming<'a> {
+        listener: &'a mut tokio::net::UnixListener,
+    }
+    impl futures::stream::Stream for Incoming<'_> {
+        type Item = Result<tokio::net::UnixStream, std::io::Error>;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            let (sock, _addr) = futures::ready!(self.get_mut().listener.poll_accept(cx))?;
+            std::task::Poll::Ready(Some(Ok(sock)))
+        }
+    }
 }
