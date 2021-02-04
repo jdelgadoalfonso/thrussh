@@ -277,7 +277,7 @@ extern crate thiserror;
 
 pub use cryptovec::CryptoVec;
 mod auth;
-mod cipher;
+pub mod cipher;
 mod compression;
 mod kex;
 mod key;
