@@ -79,6 +79,7 @@
 //! }
 //!
 //! impl server::Handler for Server {
+//!     type Error = anyhow::Error;
 //!     type FutureAuth = futures::future::Ready<Result<(Self, server::Auth), anyhow::Error>>;
 //!     type FutureUnit = futures::future::Ready<Result<(Self, Session), anyhow::Error>>;
 //!     type FutureBool = futures::future::Ready<Result<(Self, Session, bool), anyhow::Error>>;
@@ -166,6 +167,7 @@
 //!}
 //!
 //!impl client::Handler for Client {
+//!    type Error = anyhow::Error;
 //!    type FutureUnit = futures::future::Ready<Result<(Self, client::Session), anyhow::Error>>;
 //!    type FutureBool = futures::future::Ready<Result<(Self, bool), anyhow::Error>>;
 //!
@@ -191,7 +193,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!   let config = thrussh::client::Config::COMPRESSED;
+//!   let config = thrussh::client::Config::default();
 //!   let config = Arc::new(config);
 //!   let sh = Client{};
 //!
@@ -199,9 +201,9 @@
 //!   let mut agent = thrussh_keys::agent::client::AgentClient::connect_env().await.unwrap();
 //!   agent.add_identity(&key, &[]).await.unwrap();
 //!   let mut session = thrussh::client::connect(config, "localhost:22", sh).await.unwrap();
-//!   if session.authenticate_future(std::env::var("USER").unwrap(), key.clone_public_key(), agent).await.unwrap().1 {
+//!   if session.authenticate_future(std::env::var("USER").unwrap(), key.clone_public_key(), agent).await.1.unwrap() {
 //!     let mut channel = session.channel_open_session().await.unwrap();
-//!     channel.data(b"Hello, world!").await.unwrap();
+//!     channel.data(&b"Hello, world!"[..]).await.unwrap();
 //!     if let Some(msg) = channel.wait().await {
 //!         println!("{:?}", msg)
 //!     }
@@ -641,65 +643,61 @@ pub enum ChannelMsg {
 
 #[cfg(test)]
 mod test_compress {
-    use super::server::{Auth, Session};
+    use super::server::{Auth, Server as _, Session};
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     #[tokio::test]
     async fn compress_local_test() {
-        test_compress(true).await
-    }
+        let _ = env_logger::try_init();
 
-    async fn test_compress(local: bool) {
-        env_logger::try_init().unwrap_or(());
-        let (client_key, addr) = if local {
-            let client_key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
-            let client_pubkey = Arc::new(client_key.clone_public_key());
-            let mut config = super::server::Config::default();
-            config.preferred = super::Preferred::COMPRESSED;
-            config.auth_rejection_time = std::time::Duration::from_secs(0);
-            config.connection_timeout = None; // Some(std::time::Duration::from_secs(3));
-            config.auth_rejection_time = std::time::Duration::from_secs(3);
-            config
-                .keys
-                .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
-            let config = Arc::new(config);
-            let sh = Server {
-                client_pubkey,
-                clients: Arc::new(Mutex::new(HashMap::new())),
-                id: 0,
-            };
-            tokio::spawn(super::server::run(config, "0.0.0.0:2222", sh));
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            (client_key, "127.0.0.1:2222")
-        } else {
-            let client_key = thrussh_keys::load_secret_key("id_ed25519", None).unwrap();
-            (client_key, "127.0.0.1:2222")
+        let client_key = thrussh_keys::key::KeyPair::generate_ed25519().unwrap();
+        let client_pubkey = Arc::new(client_key.clone_public_key());
+        let mut config = server::Config::default();
+        config.preferred = Preferred::COMPRESSED;
+        config.connection_timeout = None; // Some(std::time::Duration::from_secs(3));
+        config.auth_rejection_time = std::time::Duration::from_secs(3);
+        config
+            .keys
+            .push(thrussh_keys::key::KeyPair::generate_ed25519().unwrap());
+        let config = Arc::new(config);
+        let mut sh = Server {
+            client_pubkey,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            id: 0,
         };
 
-        let mut config = super::client::Config::default();
-        config.preferred = super::Preferred::COMPRESSED;
-        let config = Arc::new(config);
-        let sh = Client {};
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
 
-        let mut session = super::client::connect(config, addr, sh).await.unwrap();
-        debug!("connected");
-        if session
+        tokio::spawn(async move {
+            let (socket, _) = socket.accept().await.unwrap();
+            let server = sh.new(socket.peer_addr().ok());
+            server::run_stream(config, socket, server).await.unwrap();
+        });
+
+        let mut config = client::Config::default();
+        config.preferred = Preferred::COMPRESSED;
+        let config = Arc::new(config);
+
+        dbg!(&addr);
+        let mut session = client::connect(config, addr, Client {}).await.unwrap();
+        let authenticated = session
             .authenticate_publickey(std::env::var("USER").unwrap(), Arc::new(client_key))
             .await
-            .unwrap()
-        {
-            debug!("authenticated");
-            if let Ok(mut channel) = session.channel_open_session().await {
-                channel.data(&b"Hello, world!"[..]).await.unwrap();
-                if let Some(msg) = channel.wait().await {
-                    println!("{:?}", msg)
-                }
+            .unwrap();
+        assert!(authenticated);
+        let mut channel = session.channel_open_session().await.unwrap();
+
+        let data = &b"Hello, world!"[..];
+        channel.data(data).await.unwrap();
+        let msg = channel.wait().await.unwrap();
+        match msg {
+            ChannelMsg::Data { data: msg_data } => {
+                assert_eq!(*data, *msg_data)
             }
-        }
-        if local {
-            std::thread::sleep(std::time::Duration::from_secs(40));
+            msg => panic!("Unexpected message {:?}", msg),
         }
     }
 
@@ -745,8 +743,9 @@ mod test_compress {
             debug!("auth_publickey");
             self.finished_auth(server::Auth::Accept)
         }
-        fn data(self, _channel: ChannelId, data: &[u8], session: Session) -> Self::FutureUnit {
+        fn data(self, channel: ChannelId, data: &[u8], mut session: Session) -> Self::FutureUnit {
             debug!("server data = {:?}", std::str::from_utf8(data));
+            session.data(channel, CryptoVec::from_slice(data));
             self.finished(session)
         }
     }
@@ -770,29 +769,6 @@ mod test_compress {
         ) -> Self::FutureBool {
             println!("check_server_key: {:?}", server_public_key);
             self.finished_bool(true)
-        }
-        fn channel_open_confirmation(
-            self,
-            channel: ChannelId,
-            _: u32,
-            _: u32,
-            session: client::Session,
-        ) -> Self::FutureUnit {
-            println!("channel_open_confirmation: {:?}", channel);
-            self.finished(session)
-        }
-        fn data(
-            self,
-            channel: ChannelId,
-            data: &[u8],
-            session: client::Session,
-        ) -> Self::FutureUnit {
-            debug!(
-                "client data on channel {:?}: {:?}",
-                channel,
-                std::str::from_utf8(data)
-            );
-            self.finished(session)
         }
     }
 }
