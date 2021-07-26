@@ -195,9 +195,9 @@ pub mod scalarmult {
 }
 
 pub mod aes_128_ctr {
-    pub use aes_ctr::Aes128Ctr;
-    pub use aes_ctr::stream_cipher::{
-        NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek, generic_array::GenericArray
+    pub use aes::Aes128Ctr;
+    pub use aes::cipher::{
+        NewCipher, StreamCipher, StreamCipherSeek, generic_array::GenericArray
     };
 
     pub const NONCE_BYTES: usize = 16;

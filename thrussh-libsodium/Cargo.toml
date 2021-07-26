@@ -10,7 +10,7 @@ include = [ "Cargo.toml", "src/lib.rs" ]
 edition = "2018"
 
 [dependencies]
-aes-ctr = "0.3"
+aes = { version = "0.7", features = [ "ctr" ] }
 libc = "0.2"
 lazy_static = "1.4"
 libsodium-sys = "0.2"

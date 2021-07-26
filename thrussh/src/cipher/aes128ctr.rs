@@ -15,8 +15,8 @@
 
 use super::super::Error;
 use sodium::aes_128_ctr::{
-    Aes128Ctr, NewStreamCipher, SyncStreamCipher, SyncStreamCipherSeek,
-    GenericArray, KEY_BYTES, NONCE_BYTES, Nonce, Key
+    Aes128Ctr, NewCipher, StreamCipher, StreamCipherSeek,
+    GenericArray, KEY_BYTES, NONCE_BYTES, Nonce, Key,
 };
 
 #[allow(dead_code)]
