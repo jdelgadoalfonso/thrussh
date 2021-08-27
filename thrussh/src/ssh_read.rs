@@ -23,7 +23,7 @@ impl ReadSshIdBuffer {
         let mut buf = CryptoVec::new();
         buf.resize(256);
         ReadSshIdBuffer {
-            buf: buf,
+            buf,
             sshid_len: 0,
             bytes_read: 0,
             total: 0,

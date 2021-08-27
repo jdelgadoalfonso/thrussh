@@ -33,6 +33,7 @@ use thrussh_keys::key::parse_public_key;
 use tokio;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::pin;
 
 mod kex;
 use crate::cipher;
@@ -42,13 +43,18 @@ mod encrypted;
 mod session;
 
 use tokio::sync::mpsc::*;
+
 pub mod proxy;
+
+
 pub struct Session {
     common: CommonSession<Arc<Config>>,
     receiver: Receiver<Msg>,
     sender: UnboundedSender<Reply>,
     channels: HashMap<ChannelId, UnboundedSender<OpenChannelMsg>>,
     target_window_size: u32,
+    pending_reads: Vec<CryptoVec>,
+    pending_len: u32,
 }
 
 impl Drop for Session {
@@ -208,6 +214,11 @@ pub struct Channel {
 }
 
 impl<H: Handler> Handle<H> {
+
+    pub fn is_closed(&self) -> bool {
+        self.sender.is_closed()
+    }
+
     pub async fn authenticate_password<U: Into<String>, P: Into<String>>(
         &mut self,
         user: U,
@@ -803,11 +814,12 @@ where
         receiver,
         sender: sender2,
         channels: HashMap::new(),
+        pending_reads: Vec::new(),
+        pending_len: 0,
     };
     session.read_ssh_id(sshid)?;
     let (encrypted_signal, encrypted_recv) = tokio::sync::oneshot::channel();
-    let fut = session.run(stream, handler, Some(encrypted_signal));
-    let join = tokio::spawn(Box::pin(fut));
+    let join = tokio::spawn(session.run(stream, handler, Some(encrypted_signal)));
     encrypted_recv.await.unwrap_or(());
     Ok(Handle {
         sender,
@@ -852,7 +864,7 @@ impl Session {
         let cipher = self.common.cipher.clone();
         let mac = self.common.mac.clone();
         let reading = start_reading(stream_read, buffer, cipher.clone(), mac.clone());
-        let mut reading = Box::pin(reading);
+        pin!(reading);
 
         while !self.common.disconnected {
             let cipher = cipher.clone();
@@ -1136,8 +1148,7 @@ async fn reply<H: Handler>(
             } else if buf[0] == msg::KEX_ECDH_REPLY {
                 // We've sent ECDH_INIT, waiting for ECDH_REPLY
                 session.common.kex = Some(kexdhdone.server_key_check(false, handler, buf).await?);
-                session.common.cipher
-                    .lock()
+                session.common.cipher.lock()
                     .unwrap()
                     .write(
                         &[msg::NEWKEYS],

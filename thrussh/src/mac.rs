@@ -1,5 +1,5 @@
 use cryptovec::CryptoVec;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, Mac, NewMac};
 use hmac::crypto_mac::MacError;
 use sha2::Sha256;
 use std::error::Error;
@@ -75,16 +75,16 @@ impl HMacAlgo {
     pub fn sign(&self, d: &[u8]) -> Result<[u8; BLOCK_BYTES], Box<dyn Error>> {
         if let Self::HmacSha256(_, ref mac) = self {
             let mut mac = mac.clone();
-            mac.input(d);
+            mac.update(d);
 
             // `result` has type `MacResult` which is a thin wrapper around array of
             // bytes for providing constant time equality check
-            let result = mac.result();
+            let result = mac.finalize();
 
             // To get underlying array use `code` method, but be carefull, since
             // incorrect use of the code value may permit timing attacks which defeat
             // the security provided by the `MacResult`
-            Ok(result.code().into())
+            Ok(result.into_bytes().into())
         } else {
             Err(Box::<dyn Error>::from("No hmac algo selected"))
         }
@@ -94,7 +94,7 @@ impl HMacAlgo {
     pub fn verify(&self, d: &[u8], s: &[u8]) -> Result<(), MacError> {
         if let Self::HmacSha256(_, ref mac) = self {
             let mut mac = mac.clone();
-            mac.input(d);
+            mac.update(d);
             mac.verify(s)
         } else {
             Err(MacError::default())

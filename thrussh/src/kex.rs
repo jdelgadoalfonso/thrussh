@@ -21,6 +21,7 @@ use openssl;
 use sodium;
 use std::cell::RefCell;
 use thrussh_keys::encoding::Encoding;
+use rand::RngCore;
 
 #[doc(hidden)]
 pub struct Algorithm {
@@ -73,10 +74,9 @@ impl Algorithm {
                 .clone_from_slice(&payload[5..(5 + pubkey_len)])
         };
         debug!("client_pubkey: {:?}", client_pubkey);
-        use openssl::rand::*;
         use sodium::scalarmult::*;
         let mut server_secret = Scalar([0; 32]);
-        rand_bytes(&mut server_secret.0)?;
+        rand::thread_rng().fill_bytes(&mut server_secret.0);
         let server_pubkey = scalarmult_base(&server_secret);
 
         // fill exchange.
@@ -95,10 +95,9 @@ impl Algorithm {
         client_ephemeral: &mut CryptoVec,
         buf: &mut CryptoVec,
     ) -> Result<Algorithm, crate::Error> {
-        use openssl::rand::*;
         use sodium::scalarmult::*;
         let mut client_secret = Scalar([0; 32]);
-        rand_bytes(&mut client_secret.0)?;
+        rand::thread_rng().fill_bytes(&mut client_secret.0);
         let client_pubkey = scalarmult_base(&client_secret);
 
         // fill exchange.
@@ -176,84 +175,84 @@ impl Algorithm {
         // https://tools.ietf.org/html/rfc4253#section-7.2
         BUFFER.with(|buffer| {
             KEY_BUF.with(|key| {
-        let compute_key = |c, key: &mut CryptoVec, len| -> Result<(), crate::Error> {
-            let mut buffer = buffer.borrow_mut();
-            buffer.clear();
-            key.clear();
+                let compute_key = |c, key: &mut CryptoVec, len| -> Result<(), crate::Error> {
+                    let mut buffer = buffer.borrow_mut();
+                    buffer.clear();
+                    key.clear();
 
-            if let Some(ref shared) = self.shared_secret {
-                buffer.extend_ssh_mpint(&shared.0);
-            }
+                    if let Some(ref shared) = self.shared_secret {
+                        buffer.extend_ssh_mpint(&shared.0);
+                    }
 
-            buffer.extend(exchange_hash.as_ref());
-            buffer.push(c);
-            buffer.extend(session_id.as_ref());
-            use openssl::hash::*;
-            let hash = {
-                let mut hasher = Hasher::new(MessageDigest::sha256())?;
-                hasher.update(&buffer)?;
-                hasher.finish()?
-            };
-            key.extend(hash.as_ref());
+                    buffer.extend(exchange_hash.as_ref());
+                    buffer.push(c);
+                    buffer.extend(session_id.as_ref());
+                    use openssl::hash::*;
+                    let hash = {
+                        let mut hasher = Hasher::new(MessageDigest::sha256())?;
+                        hasher.update(&buffer)?;
+                        hasher.finish()?
+                    };
+                    key.extend(hash.as_ref());
 
-            while key.len() < len {
-                // extend.
-                buffer.clear();
-                if let Some(ref shared) = self.shared_secret {
-                    buffer.extend_ssh_mpint(&shared.0);
-                }
-                buffer.extend(exchange_hash.as_ref());
-                buffer.extend(key);
-                let hash = {
-                    let mut hasher = Hasher::new(MessageDigest::sha256())?;
-                    hasher.update(&buffer)?;
-                    hasher.finish()?
+                    while key.len() < len {
+                        // extend.
+                        buffer.clear();
+                        if let Some(ref shared) = self.shared_secret {
+                            buffer.extend_ssh_mpint(&shared.0);
+                        }
+                        buffer.extend(exchange_hash.as_ref());
+                        buffer.extend(key);
+                        let hash = {
+                            let mut hasher = Hasher::new(MessageDigest::sha256())?;
+                            hasher.update(&buffer)?;
+                            hasher.finish()?
+                        };
+                        key.extend(&hash.as_ref());
+                    }
+                    Ok(())
                 };
-                key.extend(&hash.as_ref());
-            }
-            Ok(())
-        };
 
-        let (l_to_r_iv, l_to_r_key, l_to_r_mac, r_to_l_iv, r_to_l_key, r_to_l_mac) =
-        if is_server {
-            (b'B', b'D', b'F', b'A', b'C', b'E')
-        } else {
-            (b'A', b'C', b'E', b'B', b'D', b'F')
-        };
+                let (l_to_r_iv, l_to_r_key, l_to_r_mac, r_to_l_iv, r_to_l_key, r_to_l_mac) =
+                if is_server {
+                    (b'B', b'D', b'F', b'A', b'C', b'E')
+                } else {
+                    (b'A', b'C', b'E', b'B', b'D', b'F')
+                };
 
-        let mut iv = CryptoVec::new();
-        let mut mac_key_l_to_r: [u8; 32] = [0; 32];
-        let mut mac_key_r_to_l: [u8; 32] = [0; 32];
-        let mut key = key.borrow_mut();
-        if let Some(iv_len) = cipher.iv_len {
-            compute_key(l_to_r_iv, &mut iv, iv_len)?;
-        }
-        compute_key(l_to_r_key, &mut key, cipher.key_len)?;
-        let local_to_remote = (cipher.make_sealing_cipher)(&key, cipher.iv_len.map(|_| iv.as_ref()));
-        compute_key(l_to_r_mac, &mut key, mac.key_len)?;
-        mac_key_l_to_r.clone_from_slice(&key);
-        let local_to_remote_mac = (mac.make_integrity_key_sign)(&key);
+                let mut iv = CryptoVec::new();
+                let mut mac_key_l_to_r: [u8; 32] = [0; 32];
+                let mut mac_key_r_to_l: [u8; 32] = [0; 32];
+                let mut key = key.borrow_mut();
+                if let Some(iv_len) = cipher.iv_len {
+                    compute_key(l_to_r_iv, &mut iv, iv_len)?;
+                }
+                compute_key(l_to_r_key, &mut key, cipher.key_len)?;
+                let local_to_remote = (cipher.make_sealing_cipher)(&key, cipher.iv_len.map(|_| iv.as_ref()));
+                compute_key(l_to_r_mac, &mut key, mac.key_len)?;
+                mac_key_l_to_r.clone_from_slice(&key);
+                let local_to_remote_mac = (mac.make_integrity_key_sign)(&key);
 
-        if let Some(iv_len) = cipher.iv_len {
-            compute_key(r_to_l_iv, &mut iv, iv_len)?;
-        }
-        compute_key(r_to_l_key, &mut key, cipher.key_len)?;
-        let remote_to_local = (cipher.make_opening_cipher)(&key, cipher.iv_len.map(|_| iv.as_ref()));
-        compute_key(r_to_l_mac, &mut key, mac.key_len)?;
-        mac_key_r_to_l.clone_from_slice(&key);
-        let remote_to_local_mac = (mac.make_integrity_key_verify)(&key);
+                if let Some(iv_len) = cipher.iv_len {
+                    compute_key(r_to_l_iv, &mut iv, iv_len)?;
+                }
+                compute_key(r_to_l_key, &mut key, cipher.key_len)?;
+                let remote_to_local = (cipher.make_opening_cipher)(&key, cipher.iv_len.map(|_| iv.as_ref()));
+                compute_key(r_to_l_mac, &mut key, mac.key_len)?;
+                mac_key_r_to_l.clone_from_slice(&key);
+                let remote_to_local_mac = (mac.make_integrity_key_verify)(&key);
 
-        debug!("cipher l to r; {:?}", &local_to_remote);
-        debug!("cipher r to l; {:?}", &remote_to_local);
+                debug!("cipher l to r; {:?}", &local_to_remote);
+                debug!("cipher r to l; {:?}", &remote_to_local);
 
-        Ok((super::cipher::CipherPair {
-            local_to_remote,
-            remote_to_local,
-        }, super::mac::MacPair {
-            local_to_remote: super::mac::HMacAlgo::HmacSha256(mac_key_l_to_r, local_to_remote_mac),
-            remote_to_local: super::mac::HMacAlgo::HmacSha256(mac_key_r_to_l, remote_to_local_mac),
-        }))
+                Ok((super::cipher::CipherPair {
+                    local_to_remote,
+                    remote_to_local,
+                }, super::mac::MacPair {
+                    local_to_remote: super::mac::HMacAlgo::HmacSha256(mac_key_l_to_r, local_to_remote_mac),
+                    remote_to_local: super::mac::HMacAlgo::HmacSha256(mac_key_r_to_l, remote_to_local_mac),
+                }))
+            })
         })
-    })
     }
 }

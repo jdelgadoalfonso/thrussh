@@ -189,16 +189,28 @@ impl Encrypted {
     pub fn flush_pending(&mut self, channel: ChannelId) -> usize {
         let mut pending_size = 0;
         if let Some(channel) = self.channels.get_mut(&channel) {
-            while let Some((buf, a, size)) = channel.pending_data.pop_front() {
-                let (buf, size_) = Self::data_noqueue(&mut self.write, channel, buf, size);
-                pending_size += size_;
-                if size_ < buf.len() {
-                    channel.pending_data.push_front((buf, a, size_));
+            while let Some((buf, a, from)) = channel.pending_data.pop_front() {
+                let size = Self::data_noqueue(&mut self.write, channel, &buf, from);
+                pending_size += size;
+                if from + size < buf.len() {
+                    channel.pending_data.push_front((buf, a, from + size));
                     break;
                 }
             }
         }
         pending_size
+    }
+
+    pub fn flush_all_pending(&mut self) {
+        for (_, channel) in self.channels.iter_mut() {
+            while let Some((buf, a, from)) = channel.pending_data.pop_front() {
+                let size = Self::data_noqueue(&mut self.write, channel, &buf, from);
+                if from + size < buf.len() {
+                    channel.pending_data.push_front((buf, a, from + size));
+                    break;
+                }
+            }
+        }
     }
 
     pub fn has_pending_data(&self, channel: ChannelId) -> bool {
@@ -209,12 +221,15 @@ impl Encrypted {
         }
     }
 
+    /// Push the largest amount of `&buf0[from..]` that can fit into
+    /// the window, dividing it into packets if it is too large, and
+    /// return the length that was written.
     fn data_noqueue(
         write: &mut CryptoVec,
         channel: &mut Channel,
-        buf0: CryptoVec,
+        buf0: &[u8],
         from: usize,
-    ) -> (CryptoVec, usize) {
+    ) -> usize {
         let mut buf = if buf0.len() as u32 > from as u32 + channel.recipient_window_size {
             &buf0[from..from + channel.recipient_window_size as usize]
         } else {
@@ -239,17 +254,17 @@ impl Encrypted {
             buf = &buf[off..]
         }
         debug!("buf.len() = {:?}, buf_len = {:?}", buf.len(), buf_len);
-        (buf0, from + buf_len)
+        buf_len
     }
 
     pub fn data(&mut self, channel: ChannelId, buf0: CryptoVec) {
         if let Some(channel) = self.channels.get_mut(&channel) {
             assert!(channel.confirmed);
-            if !channel.pending_data.is_empty() {
+            if !channel.pending_data.is_empty() || self.rekey.is_some() {
                 channel.pending_data.push_back((buf0, None, 0));
                 return;
             }
-            let (buf0, buf_len) = Self::data_noqueue(&mut self.write, channel, buf0, 0);
+            let buf_len = Self::data_noqueue(&mut self.write, channel, &buf0, 0);
             if buf_len < buf0.len() {
                 channel.pending_data.push_back((buf0, None, buf_len))
             }

@@ -94,10 +94,15 @@ impl AsRef<str> for Name {
     }
 }
 
-#[derive(Debug)]
 pub struct CipherPair {
     pub local_to_remote: SealingCipher,
     pub remote_to_local: OpeningCipher,
+}
+
+impl std::fmt::Debug for CipherPair {
+    fn fmt(&self, _: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        Ok(())
+    }
 }
 
 pub const CLEAR_PAIR: CipherPair = CipherPair {
@@ -144,7 +149,7 @@ pub async fn read<'a, R: AsyncRead + Unpin>(
         debug!("reading, len = {:?}", len);
         {
             let mut pair = pair.lock().unwrap();
-            debug!("Que cojones de cipher estoy usando: {:?}", &pair);
+            debug!("it is being used cipher: {:?}", &pair);
             let key = pair.remote_to_local.as_opening_key();
             let seqn = buffer.seqn.0;
             buffer.buffer.clear();
@@ -231,7 +236,6 @@ impl CipherPair {
         buffer.seqn += Wrapping(1);
     }
 }
-
 
 pub const PACKET_LENGTH_LEN: usize = 4;
 

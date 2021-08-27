@@ -16,11 +16,15 @@ use crate::encoding::{Encoding, Reader};
 pub use crate::signature::*;
 use crate::Error;
 use cryptovec::CryptoVec;
+#[cfg(feature = "openssl")]
 use openssl::pkey::{Private, Public};
+use thrussh_libsodium as sodium;
 
 /// Keys for elliptic curve Ed25519 cryptography.
 pub mod ed25519 {
-    pub use sodium::ed25519::{keypair, sign_detached, verify_detached, PublicKey, SecretKey};
+    pub use thrussh_libsodium::ed25519::{
+        keypair, sign_detached, verify_detached, PublicKey, SecretKey,
+    };
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -39,7 +43,7 @@ pub const ED25519: Name = Name("ssh-ed25519");
 pub const RSA_SHA2_512: Name = Name("rsa-sha2-512");
 /// The name of the ssh-sha2-256 algorithm for SSH.
 pub const RSA_SHA2_256: Name = Name("rsa-sha2-256");
-/// The name of the ssh-rsa algorithm for SSH.
+
 pub const SSH_RSA: Name = Name("ssh-rsa");
 
 impl Name {
@@ -82,6 +86,7 @@ impl SignatureHash {
         }
     }
 
+    #[cfg(feature = "openssl")]
     fn to_message_digest(&self) -> openssl::hash::MessageDigest {
         use openssl::hash::MessageDigest;
         match *self {
@@ -96,8 +101,9 @@ impl SignatureHash {
 #[derive(Eq, PartialEq, Debug)]
 pub enum PublicKey {
     #[doc(hidden)]
-    Ed25519(sodium::ed25519::PublicKey),
+    Ed25519(thrussh_libsodium::ed25519::PublicKey),
     #[doc(hidden)]
+    #[cfg(feature = "openssl")]
     RSA {
         key: OpenSSLPKey,
         hash: SignatureHash,
@@ -105,15 +111,20 @@ pub enum PublicKey {
 }
 
 /// A public key from OpenSSL.
+#[cfg(feature = "openssl")]
 pub struct OpenSSLPKey(pub openssl::pkey::PKey<Public>);
 
+#[cfg(feature = "openssl")]
 use std::cmp::{Eq, PartialEq};
+#[cfg(feature = "openssl")]
 impl PartialEq for OpenSSLPKey {
     fn eq(&self, b: &OpenSSLPKey) -> bool {
         self.0.public_eq(&b.0)
     }
 }
+#[cfg(feature = "openssl")]
 impl Eq for OpenSSLPKey {}
+#[cfg(feature = "openssl")]
 impl std::fmt::Debug for OpenSSLPKey {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "OpenSSLPKey {{ (hidden) }}")
@@ -138,36 +149,40 @@ impl PublicKey {
                 p.key.clone_from_slice(key_bytes);
                 Ok(PublicKey::Ed25519(p))
             }
-            b"ssh-rsa" | b"rsa-sha2-256" | b"rsa-sha2-512" => {
-                let mut p = pubkey.reader(0);
-                let key_algo = p.read_string()?;
-                debug!("{:?}", std::str::from_utf8(key_algo));
-                if key_algo != b"ssh-rsa"
-                    && key_algo != b"rsa-sha2-256"
-                    && key_algo != b"rsa-sha2-512"
+            b"ssh-rsa" | b"rsa-sha2-256" | b"rsa-sha2-512" if cfg!(feature = "openssl") => {
+                #[cfg(feature = "openssl")]
                 {
-                    return Err(Error::CouldNotReadKey.into());
+                    let mut p = pubkey.reader(0);
+                    let key_algo = p.read_string()?;
+                    debug!("{:?}", std::str::from_utf8(key_algo));
+                    if key_algo != b"ssh-rsa" && key_algo != b"rsa-sha2-256" && key_algo != b"rsa-sha2-512" {
+                        return Err(Error::CouldNotReadKey.into());
+                    }
+                    let key_e = p.read_string()?;
+                    let key_n = p.read_string()?;
+                    use openssl::bn::BigNum;
+                    use openssl::pkey::PKey;
+                    use openssl::rsa::Rsa;
+                    Ok(PublicKey::RSA {
+                        key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
+                            BigNum::from_slice(key_n)?,
+                            BigNum::from_slice(key_e)?,
+                        )?)?),
+                        hash: {
+                            if algo == b"rsa-sha2-256" || algo == b"ssh-rsa" {
+                                SignatureHash::SHA2_256
+                            } else if algo == b"rsa-sha2-512" {
+                                SignatureHash::SHA2_512
+                            } else {
+                                SignatureHash::SHA1
+                            }
+                        },
+                    })
                 }
-                let key_e = p.read_string()?;
-                let key_n = p.read_string()?;
-                use openssl::bn::BigNum;
-                use openssl::pkey::PKey;
-                use openssl::rsa::Rsa;
-                Ok(PublicKey::RSA {
-                    key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
-                        BigNum::from_slice(key_n)?,
-                        BigNum::from_slice(key_e)?,
-                    )?)?),
-                    hash: {
-                        if algo == b"rsa-sha2-256" || algo == b"ssh-rsa" {
-                            SignatureHash::SHA2_256
-                        } else if algo == b"rsa-sha2-512" {
-                            SignatureHash::SHA2_512
-                        } else {
-                            SignatureHash::SHA1
-                        }
-                    },
-                })
+                #[cfg(not(feature = "openssl"))]
+                {
+                    unreachable!()
+                }
             }
             _ => Err(Error::CouldNotReadKey.into()),
         }
@@ -177,6 +192,7 @@ impl PublicKey {
     pub fn name(&self) -> &'static str {
         match *self {
             PublicKey::Ed25519(_) => ED25519.0,
+            #[cfg(feature = "openssl")]
             PublicKey::RSA { ref hash, .. } => hash.name().0,
         }
     }
@@ -187,6 +203,7 @@ impl PublicKey {
             &PublicKey::Ed25519(ref public) => {
                 sodium::ed25519::verify_detached(&sig, buffer, &public)
             }
+            #[cfg(feature = "openssl")]
             &PublicKey::RSA { ref key, ref hash } => {
                 use openssl::sign::*;
                 let verify = || {
@@ -203,9 +220,14 @@ impl PublicKey {
     pub fn fingerprint(&self) -> String {
         use super::PublicKeyBase64;
         let key = self.public_key_bytes();
-        data_encoding::BASE64_NOPAD.encode(&openssl::sha::sha256(&key[..]))
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&key[..]);
+        data_encoding::BASE64_NOPAD.encode(&hasher.finalize())
     }
 
+
+    #[cfg(feature = "openssl")]
     pub fn set_algorithm(&mut self, algorithm: &[u8]) {
         if let PublicKey::RSA { ref mut hash, .. } = self {
             if algorithm == b"rsa-sha2-512" {
@@ -216,6 +238,10 @@ impl PublicKey {
                 *hash = SignatureHash::SHA1
             }
         }
+    }
+
+    #[cfg(not(feature = "openssl"))]
+    pub fn set_algorithm(&mut self, _: &[u8]) {
     }
 }
 
@@ -231,6 +257,7 @@ impl Verify for PublicKey {
 /// Public key exchange algorithms.
 pub enum KeyPair {
     Ed25519(sodium::ed25519::SecretKey),
+    #[cfg(feature = "openssl")]
     RSA {
         key: openssl::rsa::Rsa<Private>,
         hash: SignatureHash,
@@ -245,6 +272,7 @@ impl std::fmt::Debug for KeyPair {
                 "Ed25519 {{ public: {:?}, secret: (hidden) }}",
                 &key.key[32..]
             ),
+            #[cfg(feature = "openssl")]
             KeyPair::RSA { .. } => write!(f, "RSA {{ (hidden) }}"),
         }
     }
@@ -265,6 +293,7 @@ impl KeyPair {
                 public.key.clone_from_slice(&key.key[32..]);
                 PublicKey::Ed25519(public)
             }
+            #[cfg(feature = "openssl")]
             &KeyPair::RSA { ref key, ref hash } => {
                 use openssl::pkey::PKey;
                 use openssl::rsa::Rsa;
@@ -272,7 +301,7 @@ impl KeyPair {
                     key.n().to_owned().unwrap(),
                     key.e().to_owned().unwrap(),
                 )
-                .unwrap();
+                    .unwrap();
                 PublicKey::RSA {
                     key: OpenSSLPKey(PKey::from_rsa(key).unwrap()),
                     hash: hash.clone(),
@@ -285,6 +314,7 @@ impl KeyPair {
     pub fn name(&self) -> &'static str {
         match *self {
             KeyPair::Ed25519(_) => ED25519.0,
+            #[cfg(feature = "openssl")]
             KeyPair::RSA { ref hash, .. } => hash.name().0,
         }
     }
@@ -296,6 +326,7 @@ impl KeyPair {
         Some(KeyPair::Ed25519(secret))
     }
 
+    #[cfg(feature = "openssl")]
     pub fn generate_rsa(bits: usize, hash: SignatureHash) -> Option<Self> {
         let key = openssl::rsa::Rsa::generate(bits as u32).ok()?;
         Some(KeyPair::RSA { key, hash })
@@ -307,6 +338,8 @@ impl KeyPair {
             &KeyPair::Ed25519(ref secret) => Ok(Signature::Ed25519(SignatureBytes(
                 sodium::ed25519::sign_detached(to_sign.as_ref(), secret).0,
             ))),
+
+            #[cfg(feature = "openssl")]
             &KeyPair::RSA { ref key, ref hash } => Ok(Signature::RSA {
                 bytes: rsa_signature(hash, key, to_sign.as_ref())?,
                 hash: *hash,
@@ -331,6 +364,7 @@ impl KeyPair {
                 buffer.extend_ssh_string(ED25519.0.as_bytes());
                 buffer.extend_ssh_string(&signature.0);
             }
+            #[cfg(feature = "openssl")]
             &KeyPair::RSA { ref key, ref hash } => {
                 // https://tools.ietf.org/html/draft-rsa-dsa-sha2-256-02#section-2.2
                 let signature = rsa_signature(hash, key, to_sign.as_ref())?;
@@ -355,6 +389,7 @@ impl KeyPair {
                 buffer.extend_ssh_string(ED25519.0.as_bytes());
                 buffer.extend_ssh_string(&signature.0);
             }
+            #[cfg(feature = "openssl")]
             &KeyPair::RSA { ref key, ref hash } => {
                 // https://tools.ietf.org/html/draft-rsa-dsa-sha2-256-02#section-2.2
                 let signature = rsa_signature(hash, key, buffer)?;
@@ -368,6 +403,7 @@ impl KeyPair {
     }
 }
 
+#[cfg(feature = "openssl")]
 fn rsa_signature(
     hash: &SignatureHash,
     key: &openssl::rsa::Rsa<Private>,
@@ -397,7 +433,7 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
     let t = pos.read_string()?;
     if t == b"ssh-ed25519" {
         if let Ok(pubkey) = pos.read_string() {
-            use sodium::ed25519;
+            use thrussh_libsodium::ed25519;
             let mut p = ed25519::PublicKey {
                 key: [0; ed25519::PUBLICKEY_BYTES],
             };
@@ -406,18 +442,21 @@ pub fn parse_public_key(p: &[u8]) -> Result<PublicKey, Error> {
         }
     }
     if t == b"ssh-rsa" {
-        let e = pos.read_string()?;
-        let n = pos.read_string()?;
-        use openssl::bn::*;
-        use openssl::pkey::*;
-        use openssl::rsa::*;
-        return Ok(PublicKey::RSA {
-            key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
-                BigNum::from_slice(n)?,
-                BigNum::from_slice(e)?,
-            )?)?),
-            hash: SignatureHash::SHA1,
-        });
+        #[cfg(feature = "openssl")]
+        {
+            let e = pos.read_string()?;
+            let n = pos.read_string()?;
+            use openssl::bn::*;
+            use openssl::pkey::*;
+            use openssl::rsa::*;
+            return Ok(PublicKey::RSA {
+                key: OpenSSLPKey(PKey::from_rsa(Rsa::from_public_components(
+                    BigNum::from_slice(n)?,
+                    BigNum::from_slice(e)?,
+                )?)?),
+                hash: SignatureHash::SHA1,
+            });
+        }
     }
     Err(Error::CouldNotReadKey.into())
 }

@@ -404,6 +404,9 @@ pub enum Error {
     #[error("Channel send error")]
     SendError,
 
+    #[error("Pending buffer limit reached")]
+    Pending,
+
     #[error(transparent)]
     Keys(#[from] thrussh_keys::Error),
 
@@ -423,6 +426,7 @@ pub enum Error {
     Join(#[from] tokio::task::JoinError),
 
     #[error(transparent)]
+    #[cfg(feature = "openssl")]
     Openssl(#[from] openssl::error::ErrorStack),
 
     #[error(transparent)]

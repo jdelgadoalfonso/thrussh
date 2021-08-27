@@ -14,11 +14,11 @@ We welcome contributions. Currently, the main areas where we need help are:
 
 By contributing, you agree to license all your contributions under the Apache 2.0 license.
 
-Moreover, the main platform for contributing is [the Nest](//nest.pijul.com/pijul_org/thrussh), which is still at an experimental stage. Therefore, even though we do our best to avoid it, our repository might be reset, causing the patches of all contributors to be merged.
+Moreover, the main platform for contributing is [the Nest](//nest.pijul.com/pijul/thrussh), which is still at an experimental stage. Therefore, even though we do our best to avoid it, our repository might be reset, causing the patches of all contributors to be merged.
 
 
 ## Issue Reporting
 
-Please report bugs on the [issue page of this repository](//nest.pijul.com/pijul_org/thrussh).
+Please report bugs on the [issue page of this repository](//nest.pijul.com/pijul/thrussh).
 Thrussh has a full disclosure vulnerability policy.
 Please do NOT attempt to report any security vulnerability in this code privately to anybody.
